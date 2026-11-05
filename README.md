@@ -7,6 +7,9 @@
 
 ## 실행
 
+Python 없이 실행하려면 [Windows 앱 다운로드](https://github.com/Howardjoo09/data/releases/latest/download/HangulStepper.exe)를 사용하세요.
+다운로드한 `HangulStepper.exe`를 더블클릭하면 됩니다. 아래는 소스로 실행하는 방법입니다.
+
 1. Windows에 **Python 3.11 이상**을 설치하세요. 설치 시 Tcl/Tk와 Python Launcher를 포함하세요.
 2. 이 폴더의 `start.bat`을 더블클릭하세요. 실행에 필요한 외부 Python 패키지는 없습니다.
 3. 창에 입력할 글을 붙여넣고 **이 글로 준비 / 처음부터**를 누르세요.
@@ -41,7 +44,7 @@ Google Docs의 음성 입력·다른 입력 자동화 프로그램과 함께 사
 
 `build.bat`을 실행하면 별도 가상환경에 PyInstaller를 설치하고 테스트 후
 `dist\HangulStepper.exe`를 만듭니다. 이 exe는 Python이 없는 Windows에서도 실행할 수 있습니다.
-빌드에는 인터넷 연결이 필요합니다. 다운로드할 수 있는 사전 빌드 exe는 포함되어 있지 않습니다.
+빌드에는 인터넷 연결이 필요합니다. GitHub Actions도 Windows에서 빌드·시작 검증 후 릴리스에 exe를 첨부합니다.
 
 ## 검증
 

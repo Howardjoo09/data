@@ -1,0 +1,62 @@
+name: Build Windows app
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - engine.py
+      - windows_input.py
+      - requirements-build.txt
+      - tests/**
+      - .github/workflows/windows-app.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install builder
+        run: python -m pip install -r requirements-build.txt
+      - name: Test input logic
+        run: python -m unittest discover -s tests -v
+      - name: Test native Windows hooks and GUI
+        run: python app.py --self-test
+      - name: Build standalone executable
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name HangulStepper app.py
+      - name: Test standalone executable
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath dist/HangulStepper.exe -ArgumentList '--self-test' -PassThru
+          if (-not $app.WaitForExit(60000)) {
+            Stop-Process -Id $app.Id -Force
+            throw 'Executable self-test timed out'
+          }
+          if ($app.ExitCode -ne 0) { throw "Executable self-test failed: $($app.ExitCode)" }
+      - name: Retain executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: HangulStepper-Windows
+          path: dist/HangulStepper.exe
+          if-no-files-found: error
+      - name: Publish executable download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "windows-$($env:GITHUB_SHA.Substring(0, 8))"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag dist/HangulStepper.exe --clobber
+          } else {
+            gh release create $tag dist/HangulStepper.exe --target $env:GITHUB_SHA --title 'HangulStepper for Windows' --notes 'Windows 10/11 standalone app. Download HangulStepper.exe; Python installation is not required. F6: start/resume, F7: pause, Esc: exit. Native hook and startup smoke tests passed; actual Google Docs input still needs manual verification.' --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

@@ -3,10 +3,41 @@ import os
 import sys
 
 
+def self_test():
+    """Validate the packaged Windows runtime without typing into another app."""
+    import ctypes
+    import time
+    import tkinter as tk
+    from windows_input import Controller, Input
+
+    expected_size = 40 if ctypes.sizeof(ctypes.c_void_p) == 8 else 28
+    if ctypes.sizeof(Input) != expected_size:
+        raise RuntimeError("Unexpected Windows INPUT structure layout")
+    root = tk.Tk()
+    root.withdraw()
+    root.update_idletasks()
+    controller = Controller(root.winfo_id())
+    try:
+        deadline = time.monotonic() + 5
+        while not controller.ready and controller.thread.is_alive() and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.05)
+        if not controller.ready:
+            raise RuntimeError(controller.message)
+    finally:
+        controller.close()
+        root.destroy()
+    if controller.thread.is_alive():
+        raise RuntimeError("Keyboard hook did not shut down")
+    return 0
+
+
 def main():
     if os.name != "nt":
         print("Windows 10/11용 프로그램입니다. Windows에서 실행하세요.", file=sys.stderr)
         return 1
+    if "--self-test" in sys.argv:
+        return self_test()
     import tkinter as tk
     from tkinter import messagebox, ttk
     from windows_input import Controller
