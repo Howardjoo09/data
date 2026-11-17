@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>손글씨 노트 변환기 (프로토타입)</title>
+<style>
+  body { font-family: system-ui, "Malgun Gothic", sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; line-height: 1.5; }
+  section { border: 1px solid #ccc; border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
+  h2 { margin: 0 0 8px; font-size: 1.15em; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 140px; font: inherit; }
+  label { display: inline-block; margin: 2px 12px 2px 0; }
+  .row { margin: 8px 0; }
+  .msg { white-space: pre-wrap; margin-top: 8px; }
+  .err { color: #b00020; }
+  .muted { color: #666; font-size: .92em; }
+  img.page { width: 100%; border: 1px solid #ddd; margin: 8px 0; }
+  img.sheet { max-width: 100%; border: 1px solid #ddd; }
+  button { padding: 6px 14px; }
+  input[type=range] { vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>손글씨 노트 변환기 <small class="muted">프로토타입</small></h1>
+<p class="muted">① 템플릿을 인쇄해 내 글씨로 채우고 → ② 사진/스캔을 올려 글씨체를 학습시킨 뒤 → ③ 글이나 PDF를 넣으면 내 글씨로 쓴 노트 PDF를 만들어 줍니다.</p>
+
+<section>
+  <h2>① 글씨체 템플릿 만들기</h2>
+  <div id="sets" class="row"></div>
+  <div class="row">
+    <div>변환할 글을 미리 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다 (가장 자연스러운 결과):</div>
+    <textarea id="tplText" placeholder="(선택) 변환할 글을 붙여 넣으세요"></textarea>
+  </div>
+  <div class="row">
+    <label>글자마다 <select id="repeat"><option value="1">1번</option><option value="2">2번 (더 자연스러움)</option></select> 쓰기</label>
+    <button id="tplBtn">템플릿 PDF 만들기</button>
+  </div>
+  <div id="tplMsg" class="msg"></div>
+</section>
+
+<section>
+  <h2>② 작성한 템플릿 올리기 (글씨체 학습)</h2>
+  <div class="row"><input type="file" id="tplFiles" multiple accept="image/*,.pdf"></div>
+  <div class="row muted">사진(JPG·PNG)이나 스캔 PDF. 여러 쪽이면 한 번에 모두 고르세요. 네 모서리의 검은 표식이 모두 보여야 합니다.</div>
+  <div class="row">
+    <label>템플릿 ID (페이지 코드 인식 실패 시만) <input id="tplHint" size="10"></label>
+    <label><input type="checkbox" id="extend"> 현재 글씨체에 글자 추가</label>
+    <button id="profBtn">업로드하고 학습</button>
+  </div>
+  <div id="profMsg" class="msg"></div>
+  <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button></div>
+  <div id="sheetBox"></div>
+</section>
+
+<section>
+  <h2>③ 손글씨로 바꿀 글</h2>
+  <div class="row">
+    <input type="file" id="docFile" accept=".pdf,.txt,.md,text/plain,application/pdf">
+    <label><input type="checkbox" id="keepLines"> PDF 줄바꿈 그대로 유지</label>
+    <button id="docBtn">파일에서 글 가져오기</button>
+  </div>
+  <textarea id="text" placeholder="여기에 글을 입력하거나 위에서 PDF/TXT를 불러오세요"></textarea>
+  <div class="row">
+    <label>종이 <select id="paper"><option value="lined">줄노트</option><option value="grid">모눈</option><option value="blank">무지</option></select></label>
+    <label>펜 색 <select id="ink"><option value="auto">내 펜 색(자동)</option><option value="black">검정</option><option value="blue">파랑</option><option value="red">빨강</option><option value="pencil">연필</option></select></label>
+    <label><input type="checkbox" id="margin" checked> 왼쪽 여백선</label>
+  </div>
+  <div class="row">
+    <label>줄 간격 <input type="range" id="line_pitch" min="6" max="12" step="0.5" value="8"> <span></span>mm</label>
+    <label>글자 크기 <input type="range" id="size" min="0.35" max="0.9" step="0.05" value="0.6"> <span></span></label>
+  </div>
+  <div class="row">
+    <label>자간 <input type="range" id="letter_spacing" min="0" max="3" step="0.1" value="1"> <span></span></label>
+    <label>띄어쓰기 <input type="range" id="word_spacing" min="0.3" max="3" step="0.1" value="1"> <span></span></label>
+    <label>자연스러운 흔들림 <input type="range" id="messiness" min="0" max="1" step="0.05" value="0.5"> <span></span></label>
+  </div>
+  <button id="renderBtn">손글씨 노트 만들기</button>
+  <div id="renderMsg" class="msg"></div>
+  <div id="pages"></div>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+function show(el, text, isError) {
+  el.className = "msg" + (isError ? " err" : "");
+  el.textContent = text;
+}
+
+async function call(url, options) {
+  const res = await fetch(url, options);
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`);
+  return data;
+}
+
+// ---- ① template
+call("/api/charsets").then((sets) => {
+  const defaults = ["upper", "lower", "digits", "punct", "jamo", "hangul_basic"];
+  $("sets").innerHTML = sets.map((s) =>
+    `<label><input type="checkbox" value="${s.key}" ${defaults.includes(s.key) ? "checked" : ""}> ${s.label} (${s.count})</label>`
+  ).join("");
+});
+
+$("tplBtn").onclick = async () => {
+  const sets = [...document.querySelectorAll("#sets input:checked")].map((i) => i.value);
+  show($("tplMsg"), "만드는 중…");
+  try {
+    const r = await call("/api/template", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sets, text: $("tplText").value, repeat: $("repeat").value }),
+    });
+    $("tplMsg").className = "msg";
+    $("tplMsg").innerHTML = `템플릿 ID <b>${r.id}</b> · ${r.cells}칸 · ${r.pages}쪽 → ` +
+      `<a href="${r.pdf}" target="_blank">PDF 열기/인쇄</a><br>` +
+      `<span class="muted">A4에 '실제 크기(100%)'로 인쇄하세요. 다 쓰면 ②에서 사진이나 스캔을 올리면 됩니다.</span>`;
+  } catch (e) { show($("tplMsg"), e.message, true); }
+};
+
+// ---- ② profile
+function showProfile(p) {
+  $("profileId").value = p.id;
+  store.set("profileId", p.id);
+  const missing = p.missing_jamo.length
+    ? `\n빠진 자모: ${p.missing_jamo.join(" ")} → 이 자모가 들어간, 직접 쓰지 않은 한글은 기본 글꼴로 대신 씁니다.` : "";
+  return `글씨체 ID ${p.id}: 글자 ${p.chars}종 (한글 완성형 ${p.hangul}자), 글리프 ${p.glyphs}개${missing}`;
+}
+
+function showSheet(p) {
+  $("sheetBox").innerHTML = `<p class="muted">추출된 글자 (빨간 글씨가 템플릿의 글자입니다. 다르게 잘린 칸이 있으면 그 쪽을 다시 찍어 올려 주세요):</p>` +
+    `<img class="sheet" src="${p.sheet}">`;
+}
+
+$("profBtn").onclick = async () => {
+  const files = $("tplFiles").files;
+  if (!files.length) return show($("profMsg"), "파일을 먼저 고르세요.", true);
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  form.append("template_id", $("tplHint").value);
+  if ($("extend").checked) form.append("extend_profile", $("profileId").value);
+  show($("profMsg"), "글씨를 읽는 중… (사진이 크면 몇 초 걸립니다)");
+  try {
+    const p = await call("/api/profile", { method: "POST", body: form });
+    let text = showProfile(p);
+    if (p.empty.length) text += `\n비어 있던 칸: ${p.empty.join(" ")}`;
+    if (p.warnings.length) text += `\n\n주의:\n- ${p.warnings.join("\n- ")}`;
+    show($("profMsg"), text);
+    showSheet(p);
+  } catch (e) { show($("profMsg"), e.message, true); }
+};
+
+async function loadProfile(id) {
+  try {
+    const p = await call(`/api/profile/${encodeURIComponent(id)}`);
+    show($("profMsg"), showProfile(p));
+    showSheet(p);
+  } catch (e) { show($("profMsg"), "글씨체를 불러오지 못했습니다: " + e.message, true); }
+}
+$("loadProf").onclick = () => loadProfile($("profileId").value.trim());
+const saved = store.get("profileId");
+if (saved) { $("profileId").value = saved; loadProfile(saved); }
+
+// ---- ③ render
+$("docBtn").onclick = async () => {
+  const file = $("docFile").files[0];
+  if (!file) return show($("renderMsg"), "파일을 먼저 고르세요.", true);
+  const form = new FormData();
+  form.append("file", file);
+  form.append("keep_lines", $("keepLines").checked ? "1" : "0");
+  show($("renderMsg"), "글을 꺼내는 중…");
+  try {
+    const r = await call("/api/text", { method: "POST", body: form });
+    $("text").value = r.text;
+    show($("renderMsg"), r.truncated ? "글이 길어 앞부분만 가져왔습니다. 필요하면 고친 뒤 '손글씨 노트 만들기'를 누르세요."
+                                     : "글을 가져왔습니다. 필요하면 고친 뒤 '손글씨 노트 만들기'를 누르세요.");
+  } catch (e) { show($("renderMsg"), e.message, true); }
+};
+
+for (const input of document.querySelectorAll("input[type=range]")) {
+  const out = input.nextElementSibling;
+  const update = () => { out.textContent = input.value; };
+  input.oninput = update; update();
+}
+
+$("renderBtn").onclick = async () => {
+  const profile = $("profileId").value.trim();
+  if (!profile) return show($("renderMsg"), "먼저 ②에서 글씨체를 학습시키세요.", true);
+  const body = { profile_id: profile, text: $("text").value, paper: $("paper").value, ink: $("ink").value,
+                 margin_line: $("margin").checked };
+  for (const k of ["line_pitch", "size", "letter_spacing", "word_spacing", "messiness"]) body[k] = parseFloat($(k).value);
+  show($("renderMsg"), "손글씨로 쓰는 중…");
+  $("pages").innerHTML = "";
+  try {
+    const r = await call("/api/render", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    let note = `${r.pages.length}쪽 완성 → `;
+    $("renderMsg").className = "msg";
+    $("renderMsg").innerHTML = note + `<a href="${r.pdf}">PDF 다운로드</a>`;
+    const extra = [];
+    if (r.composed) extra.push(`자모를 조합해 만든 글자: ${r.composed}`);
+    if (r.fallback) extra.push(`글씨 샘플이 없어 기본 글꼴로 대신 쓴 글자: ${r.fallback}  (템플릿 ①에 이 글자들을 넣어 추가 학습하면 해결됩니다)`);
+    if (extra.length) $("renderMsg").insertAdjacentHTML("beforeend", `<div class="muted">${extra.map(escapeHtml).join("<br>")}</div>`);
+    $("pages").innerHTML = r.pages.map((u) => `<img class="page" src="${u}">`).join("");
+  } catch (e) { show($("renderMsg"), e.message, true); }
+};
+
+function escapeHtml(s) {
+  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+</script>
+</body>
+</html>
