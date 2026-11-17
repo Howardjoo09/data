@@ -193,16 +193,20 @@ def _plausible(role, vclass, unit, boxes):
         return False  # ㅗㅜㅡ... are wide
     if role == "V" and vclass in ("right", "right_wide") and (y1 - y0) < 0.55:
         return False  # ㅏㅓㅣ... are tall
+    if role == "V" and vclass == "right_wide" and (x1 - x0) < 0.3:
+        return False  # ㅐㅔ... have two bars
     return True
 
 
 def harvest(ch, mask):
-    """Split a handwritten syllable into its jamo by stroke position.
+    """Split a handwritten syllable into its jamo.
 
     Returns ``{role: (jamo, mask, unit_box)}`` with roles I/V/F, or ``None`` when the parts
-    cannot be attributed with confidence: a stroke running from one jamo into the next, a
-    part far from where that jamo belongs, or parts in the wrong order.  A wrong jamo would
-    spoil every syllable built from it, so doubtful syllables are simply not used.
+    cannot be attributed with confidence.  Separate strokes are first sorted by position; when
+    one stroke runs from one jamo into the next (common in fluent handwriting) the syllable is
+    cut where the least ink crosses instead.  Either way every part must sit roughly where that
+    jamo belongs and the parts must be in syllable order -- a wrong jamo would spoil every
+    syllable built from it, so doubtful syllables are simply not used.
     """
     initial, vowel, final = decompose(ch)
     vclass = vowel_class(vowel)
@@ -210,19 +214,12 @@ def harvest(ch, mask):
     H, W = mask.shape
     if H < 8 or W < 8:
         return None
-    binary = cv2.morphologyEx((mask > 0.3).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
     boxes = role_boxes(vclass, bool(final))
-    owner = np.full((H, W), "", dtype=object)
-    for i in range(1, n):
-        x, y, w, h, area = stats[i]
-        unit = (x / W, y / H, (x + w) / W, (y + h) / H)
-        size = max((unit[2] - unit[0]) * (unit[3] - unit[1]), 1e-6)
-        scores = {role: sum(_overlap(unit, b) for b in bs) / size for role, bs in boxes.items()}
-        role = max(scores, key=scores.get)
-        if size > 0.12 and scores[role] < 0.55:
-            return None  # one stroke runs through two jamo: cannot be cut reliably
-        owner[labels == i] = role
+    owner = _owner_by_strokes(mask, boxes)
+    if owner is None and vclass != "mixed":
+        owner = _owner_by_cuts(mask, vclass, bool(final), vowel)
+    if owner is None:
+        return None
     parts = {}
     for role, jamo in (("I", initial), ("V", vowel), ("F", final)):
         if role not in boxes:
@@ -238,6 +235,86 @@ def harvest(ch, mask):
     return parts if _arranged(parts, vclass) else None
 
 
+def _owner_by_strokes(mask, boxes):
+    """Give each separate stroke to the jamo region it mostly lies in (None if one straddles)."""
+    H, W = mask.shape
+    binary = cv2.morphologyEx((mask > 0.3).astype(np.uint8), cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    owner = np.full((H, W), "", dtype=object)
+    for i in range(1, n):
+        x, y, w, h, area = stats[i]
+        unit = (x / W, y / H, (x + w) / W, (y + h) / H)
+        size = max((unit[2] - unit[0]) * (unit[3] - unit[1]), 1e-6)
+        scores = {role: sum(_overlap(unit, b) for b in bs) / size for role, bs in boxes.items()}
+        role = max(scores, key=scores.get)
+        if size > 0.12 and scores[role] < 0.55:
+            return None  # one stroke runs through two jamo
+        owner[labels == i] = role
+    return owner
+
+
+def _valley(profile, lo, hi, pick="min"):
+    """Where to cut across profile[lo:hi]: through little ink, or None if no such place.
+
+    ``pick`` chooses among the low-ink positions: the thinnest ("min"), or the first / last one,
+    so a cut can hug a consonant instead of halving a vowel's short stroke.
+    """
+    lo, hi = max(0, int(lo)), min(len(profile), int(hi))
+    if hi - lo < 2:
+        return None
+    smooth = np.convolve(profile, np.ones(3) / 3, mode="same")
+    low = [i for i in range(lo, hi) if smooth[i] <= 0.3 * smooth.max()]
+    if not low:
+        return None
+    if pick == "first":
+        return low[0]
+    if pick == "last":
+        return low[-1]
+    return min(low, key=lambda i: smooth[i])
+
+
+def _owner_by_cuts(mask, vclass, has_final, vowel):
+    """Cut a syllable whose jamo are joined: straight cuts through the thinnest ink."""
+    H, W = mask.shape
+    ink = (mask > 0.3).astype(np.float32)
+    owner = np.full((H, W), "", dtype=object)
+    ys, xs = np.mgrid[0:H, 0:W]
+    if vclass in ("right", "right_wide"):
+        top = H
+        if has_final:
+            y = _valley(ink.sum(axis=1), 0.45 * H, 0.85 * H)
+            if y is None:
+                return None
+            top = y
+        if vclass == "right_wide":  # ㅐ ㅔ ...: cut before the first of the two bars
+            x = _valley(ink[:top].sum(axis=0), 0.25 * W, 0.65 * W, "first")
+        else:
+            x = _valley(ink[:top].sum(axis=0), 0.3 * W, 0.8 * W)
+        if x is None:
+            return None
+        owner[(ys < top) & (xs < x)] = "I"
+        owner[(ys < top) & (xs >= x)] = "V"
+        if has_final:
+            owner[ys >= top] = "F"
+    else:  # vowel underneath: ㅗ ㅛ ㅜ ㅠ ㅡ
+        rows = ink.sum(axis=1)
+        lo, hi = (0.25 * H, 0.75 * H) if has_final else (0.3 * H, 0.95 * H)
+        bar = int(lo) + int(np.argmax(rows[int(lo):int(hi)]))  # the long horizontal stroke
+        up = vowel in "ㅗㅛ"  # short strokes above the bar: cut right under the initial
+        y1 = _valley(rows, 0.15 * H, bar - 0.04 * H, "first" if up else "min")
+        if y1 is None:
+            return None
+        owner[ys < y1] = "I"
+        owner[ys >= y1] = "V"
+        if has_final:  # ㅜ ㅠ hang below the bar: cut right above the final
+            y2 = _valley(rows, bar + 0.04 * H, 0.9 * H, "last" if vowel in "ㅜㅠ" else "min")
+            if y2 is None:
+                return None
+            owner[ys >= y2] = "F"
+    owner[mask <= 0.05] = ""
+    return owner
+
+
 def _arranged(parts, vclass):
     """The parts must be laid out like a syllable of this shape (initial left of / above the
     vowel, final underneath), which catches strokes credited to the wrong jamo."""
@@ -245,6 +322,7 @@ def _arranged(parts, vclass):
     f = parts["F"][2] if "F" in parts else None
     if vclass in ("right", "right_wide"):
         ok = i[2] <= v[0] + 0.25 and i[0] <= 0.3 and v[2] >= 0.75
+        ok = ok and i[2] <= (0.62 if vclass == "right_wide" else 0.72)  # the vowel keeps its room
         if f:
             ok = ok and f[1] >= i[3] - 0.12 and f[1] >= v[3] - 0.3 and f[3] >= 0.9
     elif vclass == "bottom":

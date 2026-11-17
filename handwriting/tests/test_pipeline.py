@@ -216,6 +216,39 @@ class FreeformTests(unittest.TestCase):
         self.assertTrue({"새", "운", "내"} <= renderer.factory.composed)
         self.assertEqual(renderer.factory.fallback, {"용"})
 
+    def test_single_line_crop(self):
+        # A crop holding one line of writing (letters fill most of its height) must still work.
+        page, truth = make_sample.freeform_page("그러나, 약간의 수정사항을 고려하면 다음 정리를 얻을 수 있다.",
+                                                self.font, seed=4)
+        ys = [t[2] for t in truth] + [t[4] for t in truth]
+        crop = page[int(min(ys)) - 6:int(max(ys)) + 6]
+        ok, png = cv2.imencode(".png", crop[:, :, ::-1])
+        text = "그러나, 약간의 수정사항을 고려하면 다음 정리를 얻을 수 있다."
+        _, report = freeform.extract_freeform(extract.load_images(png.tobytes()), text)
+        self.assertGreaterEqual(report["learned"], 0.8 * len(truth))
+
+    def test_shape_check_catches_shifted_labels(self):
+        from PIL import Image, ImageDraw
+        font = render._fallback_font(90)
+
+        def glyph(ch):
+            img = Image.new("L", (130, 130), 0)
+            ImageDraw.Draw(img).text((65, 65), ch, font=font, fill=255, anchor="mm")
+            return np.asarray(img, np.float32) / 255
+
+        self.assertTrue(freeform.shape_ok("위", glyph("위"), 100))
+        self.assertFalse(freeform.shape_ok("위", glyph("우"), 100))   # ㅣ missing
+        self.assertTrue(freeform.shape_ok("우", glyph("우"), 100))
+        self.assertFalse(freeform.shape_ok("우", glyph("위"), 100))   # a neighbour's ㅣ attached
+        self.assertFalse(freeform.shape_ok("가", glyph("."), 100))    # far too short for Hangul
+        self.assertTrue(freeform.shape_ok("(", glyph("("), 100))
+        self.assertFalse(freeform.shape_ok("(", glyph("ㅌ"), 100))
+
+    def test_short_glyph_among_syllables_is_dropped(self):
+        tall = {"char": "가", "line": 0, "top": 0, "bottom": 100}
+        found = [dict(tall, n=i) for i in range(4)] + [{"char": "나", "line": 0, "top": 40, "bottom": 100, "n": 9}]
+        self.assertEqual([g["n"] for g in freeform._even_heights(found)], [0, 1, 2, 3])  # 'an' learned as 나
+
     def test_harvest_rejects_jamo_joined_into_one_stroke(self):
         from PIL import Image, ImageDraw
         img = Image.new("L", (100, 100), 0)
