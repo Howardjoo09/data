@@ -12,7 +12,7 @@ import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
 from . import charsets
-from .compose import JamoSource, compose_syllable, match_stroke, stroke_width, tight
+from .compose import Composer, JamoSource, match_stroke, stroke_width, tight
 
 PX = 10  # profile resolution, px per mm
 BASELINE_LETTERS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZacemnorsuvwxz0123456789")
@@ -105,7 +105,13 @@ class GlyphFactory:
         self.rng = rng
         self.last = {}
         self.composed, self.fallback = set(), set()
-        self.jamo = JamoSource(lambda j: self._pick(j).mask if j in profile.glyphs else None)
+        standalone = lambda j: self._pick(j).mask if j in profile.glyphs else None  # noqa: E731
+        self.jamo = JamoSource(standalone)
+        self.composer = Composer(standalone, rng)
+        self.harvested = 0
+        for c, variants in profile.glyphs.items():
+            if charsets.is_syllable(c):
+                self.harvested += sum(self.composer.learn(c, g.mask) for g in variants)
         self._font_cache = {}
 
     def _pick(self, ch):
@@ -125,7 +131,7 @@ class GlyphFactory:
         if charsets.is_syllable(ch):
             p = self.p
             w_px, h_px = int(round(p.hangul_w * PX)), int(round(p.hangul_h * PX))
-            mask = compose_syllable(ch, self.jamo, w_px, h_px)
+            mask = self.composer.compose(ch, w_px, h_px)
             if mask is not None and mask.max() > 0:
                 self.composed.add(ch)
                 mask = match_stroke(mask, p.stroke)

@@ -17,7 +17,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
-from hwnote import charsets, compose, extract, render, template as T, textio  # noqa: E402
+from hwnote import charsets, compose, extract, freeform, render, template as T, textio  # noqa: E402
 import make_sample  # noqa: E402
 
 
@@ -144,6 +144,119 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(pdf.data.startswith(b"%PDF"))
         self.assertEqual(client.post("/api/render", json={"profile_id": "../../etc", "text": "x"}).status_code, 404)
         self.assertEqual(client.get("/api/output/abc/../../x").status_code, 404)
+
+
+FREEFORM_TEXT = ("오늘은 생명과학 시간에 세포 호흡에 대해 배웠다. 세포 호흡은 포도당을 분해해서 에너지를 얻는 과정이다.\n"
+                 "산소가 충분하면 ATP가 많이 만들어지지만, 부족하면 젖산 발효가 일어난다.\n"
+                 "다음 주까지 광합성과 비교하는 표를 만들어 오기! (시험 범위: 1~3단원)")
+
+
+def located(report, truth, transcript):
+    """(correct, wrong): whether each learned character was cut from the right place."""
+    chars = [c for c in transcript if not c.isspace()]
+    correct = wrong = 0
+    for n, (x, y) in report["positions"].items():
+        hit = [c for c, x0, y0, x1, y1 in truth if x0 - 2 <= x <= x1 + 2 and y0 - 2 <= y <= y1 + 2]
+        if hit and hit[0] == chars[n]:
+            correct += 1
+        else:
+            wrong += 1
+    return correct, wrong
+
+
+class FreeformTests(unittest.TestCase):
+    """Ordinary handwriting (no template) plus a transcript of what it says."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.font = font_file(cls.tmp.name)
+        page, truth = make_sample.freeform_page(FREEFORM_TEXT, cls.font, seed=2)
+        cls.photo, cls.truth = make_sample.freeform_photo(page, truth, seed=2, angle=-2.0)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_characters_are_found_in_the_right_place(self):
+        image = extract.load_images(self.photo)[0]
+        glyphs, report = freeform.extract_freeform([image], FREEFORM_TEXT)
+        correct, wrong = located(report, self.truth, FREEFORM_TEXT)
+        self.assertEqual(report["chars"], len(self.truth))
+        self.assertGreaterEqual(correct, 0.95 * len(self.truth))
+        self.assertLessEqual(wrong, 1)
+        self.assertEqual(len(glyphs), report["learned"])
+
+    def test_transcript_mistakes_are_skipped_not_learned_wrongly(self):
+        typo = FREEFORM_TEXT.replace("분해해서", "분해서").replace("1~3단원", "1~3 단원까지")
+        image = extract.load_images(self.photo)[0]
+        _, report = freeform.extract_freeform([image], typo)
+        correct, wrong = located(report, self.truth, typo)
+        self.assertLessEqual(wrong, 2)
+        self.assertGreater(correct, 0.8 * len(self.truth))
+        self.assertLess(report["learned"], len(self.truth))  # words around the mistakes are left out
+
+    def test_line_splitting_survives_crowded_lines(self):
+        page, truth = make_sample.freeform_page(FREEFORM_TEXT, self.font, seed=3, hangul_mm=6.3, pitch_mm=7.5,
+                                                gap=(0.0, 0.06))
+        photo, truth = make_sample.freeform_photo(page, truth, seed=3)
+        _, report = freeform.extract_freeform(extract.load_images(photo), FREEFORM_TEXT)
+        correct, wrong = located(report, truth, FREEFORM_TEXT)
+        self.assertGreaterEqual(correct, 0.9 * len(truth))
+        self.assertLessEqual(wrong, 3)
+
+    def test_unwritten_syllables_use_the_writers_own_jamo(self):
+        data = os.path.join(self.tmp.name, "data")
+        profile, _, warnings = extract.build_profile(data, [(self.photo, "notes.jpg")], transcript=FREEFORM_TEXT)
+        self.assertEqual(warnings, [])
+        renderer = render.Renderer(render.Profile(extract.profile_dir(data, profile["id"])), render.Options(seed=1))
+        self.assertGreater(renderer.factory.harvested, 20)
+        renderer.render("새 운 내 용")
+        # 새·운·내 never appear in the sample but all their jamo do; 용 needs ㅛ, which is nowhere.
+        self.assertTrue({"새", "운", "내"} <= renderer.factory.composed)
+        self.assertEqual(renderer.factory.fallback, {"용"})
+
+    def test_harvest_rejects_jamo_joined_into_one_stroke(self):
+        from PIL import Image, ImageDraw
+        img = Image.new("L", (100, 100), 0)
+        ImageDraw.Draw(img).line([(10, 20), (45, 20), (45, 80), (75, 80), (75, 5)], fill=255, width=7)
+        self.assertIsNone(compose.harvest("가", np.asarray(img, np.float32) / 255))
+
+    def test_convert_api(self):
+        import server
+        data = os.path.join(self.tmp.name, "web")
+        server.DATA = data
+        client = server.app.test_client()
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
+        page.insert_textbox(pymupdf.Rect(50, 50, 500, 300), "광합성 정리\n빛 에너지로 포도당을 만든다.",
+                            fontname="kr", fontsize=12)
+        form = {"document": (io.BytesIO(doc.tobytes()), "notes.pdf"),
+                "handwriting": [(io.BytesIO(self.photo), "hand.jpg")],
+                "transcript": FREEFORM_TEXT, "paper": "grid", "margin_line": "0"}
+        r = client.post("/api/convert", data=form, content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(r.json["text_source"], "document")
+        self.assertIn("광합성 정리", r.json["text"])
+        self.assertGreater(r.json["profile"]["freeform"]["learned"], 0.95 * len(self.truth))
+        with client.get(r.json["pdf"]) as pdf:
+            self.assertTrue(pdf.data.startswith(b"%PDF"))
+        first_id = r.json["profile"]["id"]
+        # The same handwriting again is recognised and not learned twice.
+        form = {"text": "다시 변환", "handwriting": [(io.BytesIO(self.photo), "hand.jpg")], "transcript": FREEFORM_TEXT}
+        r = client.post("/api/convert", data=form, content_type="multipart/form-data")
+        self.assertEqual(r.json["profile"]["id"], first_id)
+        # A saved handwriting style can be reused without uploading again.
+        r = client.post("/api/convert", data={"text": "저장된 글씨체", "profile_id": first_id})
+        self.assertEqual(r.status_code, 200, r.json)
+        # Free-form handwriting without its text cannot be learned.
+        r = client.post("/api/convert", data={"text": "x", "handwriting": [(io.BytesIO(self.photo), "hand.jpg")]},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("내용", r.json["error"])
+        r = client.post("/api/convert", data={"text": "x"})
+        self.assertEqual(r.status_code, 400)
 
 
 class TextTests(unittest.TestCase):

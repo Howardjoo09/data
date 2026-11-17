@@ -75,6 +75,87 @@ def fake_photo(page, seed=0):
     return jpeg.tobytes()
 
 
+# --------------------------------------------------------------------------- free-form samples
+
+def freeform_page(text, font_path, seed=0, ink=(30, 30, 40), width_mm=170, pitch_mm=8.0, hangul_mm=5.2,
+                  gap=(0.04, 0.16)):
+    """Write ``text`` on lined paper like ordinary notes.
+
+    Returns ``(rgb image, truth)`` where ``truth`` lists ``(char, x0, y0, x1, y1)`` for every
+    non-space character, so tests can check where the extractor found each one.
+    """
+    rng = np.random.default_rng(seed)
+    margin = 15 * SCALE
+    hangul_em = latin_em = None
+    fonts = {}
+
+    def font(size_px):
+        key = int(round(size_px))
+        if key not in fonts:
+            fonts[key] = ImageFont.truetype(font_path, key)
+        return fonts[key]
+
+    box = font(100).getbbox("가")
+    hangul_em = 100 * hangul_mm * SCALE / (box[3] - box[1])
+    box = font(100).getbbox("H")
+    latin_em = 100 * hangul_mm * 0.85 * SCALE / (box[3] - box[1])
+    h_px = hangul_mm * SCALE
+
+    # Lay the text out first so the page can be sized to fit.
+    placements, x, line = [], 0.0, 0
+    limit = width_mm * SCALE
+    for paragraph in charsets.normalize_text(text).split("\n"):
+        for word in paragraph.split(" "):
+            sizes = [hangul_em if (charsets.is_syllable(c) or charsets.is_jamo(c)) else latin_em for c in word]
+            sizes = [s * rng.uniform(0.92, 1.08) for s in sizes]
+            widths = [font(s).getlength(c) for c, s in zip(word, sizes)]
+            gaps = [h_px * rng.uniform(*gap) for _ in word]
+            if x > 0 and x + sum(widths) + sum(gaps) > limit:
+                x, line = 0.0, line + 1
+            for c, s, w, g in zip(word, sizes, widths, gaps):
+                placements.append((c, s, x, line))
+                x += w + g
+            x += h_px * rng.uniform(0.35, 0.55)
+        x, line = 0.0, line + 1
+    lines = line
+    height = int(2 * margin + (lines + 1) * pitch_mm * SCALE)
+    page = Image.new("RGB", (int(limit + 2 * margin), height), (250, 250, 246))
+    draw = ImageDraw.Draw(page)
+    for i in range(lines + 2):
+        y = margin + i * pitch_mm * SCALE
+        draw.line((0, y, page.width, y), fill=(170, 200, 228), width=2)
+    truth = []
+    drift = [rng.normal(0, 0.25 * SCALE) for _ in range(lines + 1)]
+    for c, s, x0, ln in placements:
+        base = margin + (ln + 1) * pitch_mm * SCALE - 1.0 * SCALE + drift[ln] + rng.normal(0, 0.12 * SCALE)
+        pos = (margin + x0, base)
+        draw.text(pos, c, font=font(s), fill=ink, anchor="ls")
+        bx = draw.textbbox(pos, c, font=font(s), anchor="ls")
+        truth.append((c, *bx))
+    return np.asarray(page), truth
+
+
+def freeform_photo(page, truth, seed=0, angle=None):
+    """Slight rotation, uneven light, noise and JPEG; the truth boxes are carried along."""
+    rng = np.random.default_rng(seed)
+    h, w = page.shape[:2]
+    angle = rng.uniform(-2.5, 2.5) if angle is None else angle
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    photo = cv2.warpAffine(page, M, (w, h), borderMode=cv2.BORDER_REPLICATE).astype(np.float32)
+    yy, xx = np.mgrid[0:h, 0:w]
+    light = 0.8 + 0.2 * (xx / w) * (1 - 0.3 * yy / h)
+    photo = photo * light[..., None] + rng.normal(0, 3.5, photo.shape)
+    photo = cv2.GaussianBlur(np.clip(photo, 0, 255).astype(np.uint8), (0, 0), 0.7)
+    scale = 0.7
+    photo = cv2.resize(photo, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    moved = []
+    for c, x0, y0, x1, y1 in truth:
+        corners = np.array([[x0, y0, 1], [x1, y0, 1], [x1, y1, 1], [x0, y1, 1]], np.float32) @ M.T * scale
+        moved.append((c, *corners.min(0), *corners.max(0)))
+    ok, jpeg = cv2.imencode(".jpg", photo[:, :, ::-1], [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return jpeg.tobytes(), moved
+
+
 def make(data_dir, font_path, set_keys, custom_text="", seed=0, skip=0.02):
     """Create a template in ``data_dir`` and return ``(info, [jpeg bytes per page])``."""
     info = T.new_template(data_dir, charsets.build_charlist(set_keys, custom_text))

@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>손글씨 노트 변환기</title>
+<style>
+  body { font-family: system-ui, "Malgun Gothic", sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; line-height: 1.5; }
+  section, details { border: 1px solid #ccc; border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
+  h2 { margin: 0 0 8px; font-size: 1.15em; }
+  summary { cursor: pointer; font-weight: 600; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 120px; font: inherit; }
+  label { display: inline-block; margin: 2px 12px 2px 0; }
+  .row { margin: 8px 0; }
+  .muted { color: #666; font-size: .92em; }
+  .err { color: #b00020; white-space: pre-wrap; }
+  .ok { white-space: pre-wrap; }
+  ul.muted { margin: 4px 0; padding-left: 20px; }
+  img.page { width: 100%; border: 1px solid #ddd; margin: 8px 0; }
+  img.sheet { max-width: 100%; border: 1px solid #ddd; }
+  button.main { font-size: 1.1em; padding: 10px 28px; }
+  input[type=range] { vertical-align: middle; }
+</style>
+</head>
+<body>
+<h1>손글씨 노트 변환기</h1>
+<p class="muted">PDF와 내 글씨체 파일을 올리고 <b>변환하기</b>를 누르면, PDF의 글을 내 글씨로 쓴 노트(PDF)로 만들어 줍니다.
+  <a href="#" id="demo">예시 자료로 채워 보기</a> · <a href="/advanced">템플릿 만들기 등 고급 기능</a></p>
+
+<section>
+  <h2>① 변환할 PDF</h2>
+  <div class="row">
+    <input type="file" id="doc" accept=".pdf,.txt,.md,application/pdf,text/plain">
+    <label><input type="checkbox" id="keepLines"> PDF 줄바꿈 그대로 유지</label>
+  </div>
+  <div class="muted">파일을 고르면 글을 꺼내 아래에 보여 줍니다. 고쳐도 되고, PDF 없이 직접 입력해도 됩니다.</div>
+  <textarea id="text" placeholder="PDF에서 꺼낸 글이 여기에 표시됩니다 (직접 입력도 가능)"></textarea>
+  <div id="docMsg" class="muted"></div>
+</section>
+
+<section>
+  <h2>② 내 글씨체 파일</h2>
+  <div class="row"><input type="file" id="hw" multiple accept="image/*,.pdf"></div>
+  <ul class="muted">
+    <li><b>템플릿에 쓴 것</b>: 사진이나 스캔을 그대로 올리면 됩니다 (가장 정확). 템플릿은 <a href="/advanced">여기서</a> 만들 수 있어요.</li>
+    <li><b>자유롭게 쓴 손글씨</b> (노트·편지 등): 아래 칸에 사진 속 글을 <b>그대로</b> 입력해 주세요.
+      여러 장이면 올린 순서대로 이어서 입력합니다. 줄바꿈 위치는 달라도 괜찮아요.</li>
+  </ul>
+  <textarea id="transcript" placeholder="(자유롭게 쓴 손글씨일 때만) 사진에 적힌 내용을 그대로 입력"></textarea>
+  <div id="savedBox" class="row" hidden>
+    <label><input type="checkbox" id="useSaved"> 파일을 올리지 않고 지난번에 학습한 글씨체 사용 (<span id="savedId"></span>)</label>
+  </div>
+</section>
+
+<details>
+  <summary>③ 노트 모양 (선택)</summary>
+  <div class="row">
+    <label>종이 <select id="paper"><option value="lined">줄노트</option><option value="grid">모눈</option><option value="blank">무지</option></select></label>
+    <label>펜 색 <select id="ink"><option value="auto">내 펜 색(자동)</option><option value="black">검정</option><option value="blue">파랑</option><option value="red">빨강</option><option value="pencil">연필</option></select></label>
+    <label><input type="checkbox" id="margin_line" checked> 왼쪽 여백선</label>
+  </div>
+  <div class="row">
+    <label>줄 간격 <input type="range" id="line_pitch" min="6" max="12" step="0.5" value="8"> <span></span>mm</label>
+    <label>글자 크기 <input type="range" id="size" min="0.35" max="0.9" step="0.05" value="0.6"> <span></span></label>
+  </div>
+  <div class="row">
+    <label>자간 <input type="range" id="letter_spacing" min="0" max="3" step="0.1" value="1"> <span></span></label>
+    <label>띄어쓰기 <input type="range" id="word_spacing" min="0.3" max="3" step="0.1" value="1"> <span></span></label>
+    <label>자연스러운 흔들림 <input type="range" id="messiness" min="0" max="1" step="0.05" value="0.5"> <span></span></label>
+  </div>
+</details>
+
+<p><button class="main" id="go">변환하기</button> <span id="status"></span></p>
+
+<section id="result" hidden>
+  <h2>결과</h2>
+  <div id="summary" class="ok"></div>
+  <p><a id="pdf" href="#">PDF 다운로드</a></p>
+  <div id="pages"></div>
+  <details><summary>학습된 글자 보기</summary><p class="muted">빨간 글씨가 그 칸에 해당하는 글자입니다. 다르게 잘린 글자가 많으면 사진을 다시 찍거나 입력한 내용을 확인해 주세요.</p><img class="sheet" id="sheet" alt=""></details>
+</section>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+
+async function call(url, options) {
+  const res = await fetch(url, options);
+  let data = {};
+  try { data = await res.json(); } catch (e) {}
+  if (!res.ok) throw new Error(data.error || `서버 오류 (${res.status})`);
+  return data;
+}
+
+function status(text, isError) {
+  $("status").className = isError ? "err" : "muted";
+  $("status").textContent = text;
+}
+
+for (const input of document.querySelectorAll("input[type=range]")) {
+  const out = input.nextElementSibling;
+  const update = () => { out.textContent = input.value; };
+  input.oninput = update; update();
+}
+
+let saved = store.get("profileId");
+if (saved) { $("savedBox").hidden = false; $("savedId").textContent = "ID " + saved; }
+
+// ① PDF -> text preview
+async function loadDocument() {
+  const file = $("doc").files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  form.append("keep_lines", $("keepLines").checked ? "1" : "0");
+  $("docMsg").textContent = "PDF에서 글을 꺼내는 중…";
+  try {
+    const r = await call("/api/text", { method: "POST", body: form });
+    $("text").value = r.text;
+    $("docMsg").textContent = `${file.name}: ${r.text.length}자를 가져왔습니다.` + (r.truncated ? " (너무 길어 앞부분만)" : "");
+  } catch (e) { $("docMsg").textContent = e.message; }
+}
+$("doc").onchange = loadDocument;
+$("keepLines").onchange = loadDocument;
+
+// Convert
+$("go").onclick = async () => {
+  const files = $("hw").files;
+  const useSaved = $("useSaved").checked && saved;
+  if (!$("text").value.trim() && !$("doc").files.length) return status("① 변환할 PDF를 올리거나 글을 입력해 주세요.", true);
+  if (!files.length && !useSaved) return status("② 내 글씨체 파일을 올려 주세요.", true);
+
+  const form = new FormData();
+  form.append("text", $("text").value);
+  if (!$("text").value.trim()) form.append("document", $("doc").files[0]);
+  form.append("keep_lines", $("keepLines").checked ? "1" : "0");
+  for (const f of files) form.append("handwriting", f);
+  form.append("transcript", $("transcript").value);
+  if (!files.length && useSaved) form.append("profile_id", saved);
+  for (const k of ["paper", "ink"]) form.append(k, $(k).value);
+  for (const k of ["line_pitch", "size", "letter_spacing", "word_spacing", "messiness"]) form.append(k, $(k).value);
+  form.append("margin_line", $("margin_line").checked ? "1" : "0");
+
+  $("go").disabled = true;
+  const started = Date.now();
+  const timer = setInterval(() => status(`글씨를 학습하고 노트를 쓰는 중… ${Math.round((Date.now() - started) / 1000)}초`), 500);
+  try {
+    const r = await call("/api/convert", { method: "POST", body: form });
+    clearInterval(timer);
+    status(`완료 (${((Date.now() - started) / 1000).toFixed(1)}초)`);
+    showResult(r);
+  } catch (e) {
+    clearInterval(timer);
+    status(e.message, true);
+  } finally {
+    $("go").disabled = false;
+  }
+};
+
+function showResult(r) {
+  const p = r.profile;
+  store.set("profileId", p.id);
+  saved = p.id;
+  $("savedBox").hidden = false; $("savedId").textContent = "ID " + p.id;
+  if (r.text && !$("text").value.trim()) $("text").value = r.text;
+  const lines = [`${r.pages.length}쪽 완성 · 학습한 글자 ${p.chars}종 (글씨체 ID ${p.id})`];
+  if (p.freeform) lines.push(`자유 양식: 입력한 내용 ${p.freeform.chars}자 중 ${p.freeform.learned}자를 사진에서 찾아 학습했습니다.`);
+  if (r.composed) lines.push(`내 자모를 조합해 만든 글자 ${r.composed.length}개: ${r.composed}`);
+  if (r.fallback) lines.push(`글씨 샘플이 없어 기본 글꼴로 쓴 글자: ${r.fallback}  → 이 글자들이 들어간 손글씨를 더 올리면 해결됩니다.`);
+  if (r.warnings && r.warnings.length) lines.push("주의:\n- " + r.warnings.join("\n- "));
+  $("summary").textContent = lines.join("\n");
+  $("pdf").href = r.pdf;
+  $("pages").innerHTML = r.pages.map((u) => `<img class="page" src="${u}" alt="">`).join("");
+  $("sheet").src = p.sheet;
+  $("result").hidden = false;
+  $("result").scrollIntoView({ behavior: "smooth" });
+}
+
+// Demo: fill both sections with the bundled example files.
+$("demo").onclick = async (event) => {
+  event.preventDefault();
+  try {
+    const info = await call("/api/demo");
+    const files = await Promise.all(info.handwriting.map(async (name) => {
+      const blob = await (await fetch(`/samples/${name}`)).blob();
+      return new File([blob], name, { type: blob.type });
+    }));
+    const dt = new DataTransfer();
+    files.forEach((f) => dt.items.add(f));
+    $("hw").files = dt.files;
+    $("transcript").value = info.transcript;
+    $("text").value = info.text;
+    $("docMsg").textContent = "예시 글을 넣었습니다. 내 PDF를 고르면 그 내용으로 바뀝니다.";
+    status("예시 자료(자유롭게 쓴 손글씨 사진 + 그 내용)를 채웠습니다. 변환하기를 눌러 보세요.");
+  } catch (e) { status("예시 자료를 불러오지 못했습니다: " + e.message, true); }
+};
+</script>
+</body>
+</html>

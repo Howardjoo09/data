@@ -3,6 +3,7 @@
     python server.py            # then open http://127.0.0.1:5000
 """
 import glob
+import hashlib
 import json
 import os
 import re
@@ -10,7 +11,7 @@ import secrets
 import shutil
 import time
 
-from flask import Flask, abort, jsonify, request, send_file
+from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
 from hwnote import charsets, extract, render, template as T, textio
 
@@ -55,13 +56,36 @@ def _profile_summary(profile):
         "chars": len(chars),
         "hangul": sum(1 for c in chars if charsets.is_syllable(c)),
         "missing_jamo": [j for j in charsets.JAMO if j not in chars],
+        "freeform": profile.get("report"),
         "sheet": f"/api/profile/{profile['id']}/sheet.png?v={len(profile['glyphs'])}",
     }
 
 
 @app.get("/")
 def index():
-    return send_file(os.path.join(BASE, "static", "index.html"))
+    return send_file(os.path.join(BASE, "static", "convert.html"))
+
+
+@app.get("/advanced")
+def advanced():
+    return send_file(os.path.join(BASE, "static", "advanced.html"))
+
+
+@app.get("/samples/<name>")
+def sample_file(name):
+    if not re.match(r"^[\w.-]+\.(jpg|png|txt|pdf)$", name):
+        abort(404)
+    return send_from_directory(os.path.join(BASE, "samples"), name)
+
+
+@app.get("/api/demo")
+def demo():
+    """Example inputs for the main page: a free-form handwriting photo, its text, and a text to convert."""
+    def read(name):
+        with open(os.path.join(BASE, "samples", name), encoding="utf-8") as f:
+            return f.read().strip()
+    return jsonify({"handwriting": ["freeform_demo.jpg"], "transcript": read("freeform_demo.txt"),
+                    "text": read("demo_text.txt")})
 
 
 @app.get("/api/charsets")
@@ -109,7 +133,8 @@ def make_profile():
         return _error("프로필 ID 형식이 올바르지 않습니다.")
     try:
         profile, empty, warnings = extract.build_profile(
-            DATA, [(f.read(), f.filename) for f in files], hint or None, extend or None)
+            DATA, [(f.read(), f.filename) for f in files], hint or None, extend or None,
+            transcript=request.form.get("transcript", "")[:MAX_TEXT])
     except extract.ExtractError as exc:
         return _error(str(exc))
     summary = _profile_summary(profile)
@@ -145,11 +170,27 @@ def upload_text():
     return jsonify({"text": text[:MAX_TEXT], "truncated": len(text) > MAX_TEXT})
 
 
-def _float(body, key, default, lo, hi):
-    try:
-        return min(hi, max(lo, float(body.get(key, default))))
-    except (TypeError, ValueError):
-        return default
+def _options(source):
+    """Rendering options from a JSON body or a form."""
+    def number(key, default, lo, hi):
+        try:
+            return min(hi, max(lo, float(source.get(key, default))))
+        except (TypeError, ValueError):
+            return default
+
+    margin = source.get("margin_line", True)
+    if isinstance(margin, str):
+        margin = margin.lower() not in ("0", "false", "off", "")
+    return render.Options(
+        paper=source.get("paper") if source.get("paper") in ("lined", "grid", "blank") else "lined",
+        ink=source.get("ink") if source.get("ink") in ("auto", *render.INK_COLORS) else "auto",
+        line_pitch=number("line_pitch", 8.0, 6.0, 12.0),
+        size=number("size", 0.6, 0.35, 0.9),
+        letter_spacing=number("letter_spacing", 1.0, 0.0, 3.0),
+        word_spacing=number("word_spacing", 1.0, 0.3, 3.0),
+        messiness=number("messiness", 0.5, 0.0, 1.0),
+        margin_line=bool(margin),
+    )
 
 
 def _prune_outputs():
@@ -159,27 +200,9 @@ def _prune_outputs():
             shutil.rmtree(path, ignore_errors=True)
 
 
-@app.post("/api/render")
-def render_notes():
-    body = request.get_json(force=True, silent=True) or {}
-    path = _profile_path(body.get("profile_id", ""))
-    text = (body.get("text") or "").strip("\n")
-    if not text.strip():
-        return _error("변환할 글을 입력하거나 파일을 올려 주세요.")
-    if len(text) > MAX_TEXT:
-        return _error(f"글이 너무 깁니다 (최대 {MAX_TEXT}자).")
-    opts = render.Options(
-        paper=body.get("paper") if body.get("paper") in ("lined", "grid", "blank") else "lined",
-        ink=body.get("ink") if body.get("ink") in ("auto", *render.INK_COLORS) else "auto",
-        line_pitch=_float(body, "line_pitch", 8.0, 6.0, 12.0),
-        size=_float(body, "size", 0.6, 0.35, 0.9),
-        letter_spacing=_float(body, "letter_spacing", 1.0, 0.0, 3.0),
-        word_spacing=_float(body, "word_spacing", 1.0, 0.3, 3.0),
-        messiness=_float(body, "messiness", 0.5, 0.0, 1.0),
-        margin_line=bool(body.get("margin_line", True)),
-    )
+def _render_job(profile_path, text, opts):
     _prune_outputs()
-    renderer = render.Renderer(render.Profile(path), opts)
+    renderer = render.Renderer(render.Profile(profile_path), opts)
     pages = renderer.render(text)
     job = secrets.token_hex(6)
     out = os.path.join(DATA, "outputs", job)
@@ -190,9 +213,80 @@ def render_notes():
         urls.append(f"/api/output/{job}/page-{n}.jpg")
     with open(os.path.join(out, "notes.pdf"), "wb") as f:
         f.write(render.pages_to_pdf(pages))
-    return jsonify({"pages": urls, "pdf": f"/api/output/{job}/notes.pdf",
-                    "composed": "".join(sorted(renderer.factory.composed)),
-                    "fallback": "".join(sorted(renderer.factory.fallback))})
+    return {"pages": urls, "pdf": f"/api/output/{job}/notes.pdf",
+            "composed": "".join(sorted(renderer.factory.composed)),
+            "fallback": "".join(sorted(renderer.factory.fallback))}
+
+
+def _check_text(text):
+    if not text.strip():
+        return "변환할 글이 없습니다. PDF를 올리거나 글을 입력해 주세요."
+    if len(text) > MAX_TEXT:
+        return f"글이 너무 깁니다 (최대 {MAX_TEXT}자)."
+    return None
+
+
+@app.post("/api/render")
+def render_notes():
+    body = request.get_json(force=True, silent=True) or {}
+    path = _profile_path(body.get("profile_id", ""))
+    text = (body.get("text") or "").strip("\n")
+    problem = _check_text(text)
+    if problem:
+        return _error(problem)
+    return jsonify(_render_job(path, text, _options(body)))
+
+
+@app.post("/api/convert")
+def convert():
+    """One step: document + handwriting (template or free-form) -> handwritten notes."""
+    form = request.form
+    text = form.get("text", "").strip("\n")
+    document = request.files.get("document")
+    source = "text"
+    if not text.strip() and document and document.filename:
+        try:
+            text = textio.extract_text(document.read(), document.filename, form.get("keep_lines") == "1")
+        except textio.TextError as exc:
+            return _error(str(exc))
+        source = "document"
+    problem = _check_text(text)
+    if problem:
+        return _error(problem)
+
+    files = [f for f in request.files.getlist("handwriting") if f.filename]
+    transcript = form.get("transcript", "")[:MAX_TEXT]
+    warnings, empty = [], []
+    if files:
+        uploads = [(f.read(), f.filename) for f in files]
+        digest = hashlib.sha256()
+        for data, _ in uploads:
+            digest.update(hashlib.sha256(data).digest())
+        digest.update(charsets.normalize_text(transcript).strip().encode())
+        profile_id = digest.hexdigest()[:10]  # same files again -> reuse what was learned
+        path = extract.profile_dir(DATA, profile_id)
+        if os.path.exists(os.path.join(path, "profile.json")):
+            with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+                profile = json.load(f)
+        else:
+            try:
+                profile, empty, warnings = extract.build_profile(DATA, uploads, transcript=transcript,
+                                                                 new_id=profile_id)
+            except extract.ExtractError as exc:
+                return _error(str(exc))
+    elif form.get("profile_id"):
+        path = _profile_path(form.get("profile_id"))
+        with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+            profile = json.load(f)
+    else:
+        return _error("내 글씨체 파일(템플릿 사진 또는 손글씨 사진)을 올려 주세요.")
+    if not profile["glyphs"]:
+        return _error("글씨체 파일에서 글자를 찾지 못했습니다.\n" + "\n".join(warnings))
+
+    result = _render_job(extract.profile_dir(DATA, profile["id"]), text, _options(form))
+    result.update(profile=_profile_summary(profile), warnings=warnings, empty=empty,
+                  text_source=source, text=text if source == "document" else None)
+    return jsonify(result)
 
 
 @app.get("/api/output/<job>/<name>")

@@ -170,16 +170,28 @@ def profile_dir(data_dir, profile_id):
     return os.path.join(data_dir, "profiles", profile_id)
 
 
-def build_profile(data_dir, uploads, template_hint=None, profile_id=None):
-    """Create (or extend) a profile from uploaded files ``[(bytes, filename), ...]``."""
-    pages, warnings = [], []
+def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transcript="", new_id=None):
+    """Create (or extend) a profile from uploaded files ``[(bytes, filename), ...]``.
+
+    Pages showing the corner markers are read as templates.  Any other page is read as
+    free-form handwriting, which needs ``transcript`` (the text written on those pages, in
+    order).  Returns ``(profile, empty_template_boxes, warnings)``; ``profile["report"]``
+    describes the free-form part.
+    """
+    from . import freeform  # imported here: freeform builds on this module
+
+    pages, warnings, loose = [], [], []
     for data, name in uploads:
         for n, image in enumerate(load_images(data, name)):
             label = f"{name} {n + 1}쪽" if len(uploads) > 1 or n else name
             try:
                 page = rectify(image)
             except ExtractError as exc:
-                warnings.append(f"{label}: {exc}")
+                if transcript.strip():
+                    loose.append(image)
+                else:
+                    warnings.append(f"{label}: 템플릿 표식이 없습니다. 자유롭게 쓴 손글씨라면 "
+                                    "사진에 적힌 내용을 함께 입력해 주세요.")
                 continue
             page_id = read_page_id(page)
             if page_id is None and template_hint:
@@ -197,8 +209,17 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None):
                             "(이 서버에서 만든 템플릿만 인식할 수 있습니다).")
             continue
         resolved.append((page, info["pages"][page_no]))
-    if not resolved:
-        raise ExtractError("처리할 수 있는 템플릿 페이지가 없습니다.\n" + "\n".join(warnings))
+    report = None
+    loose_glyphs = []
+    if loose:
+        loose_glyphs, report = freeform.extract_freeform(loose, transcript)
+        report.pop("positions", None)
+        report["ink"] = freeform.ink_color(loose)
+        if report["learned"] < 0.5 * report["chars"]:
+            warnings.append(f"자유 양식: 입력한 내용 {report['chars']}자 중 {report['learned']}자만 확실하게 "
+                            "찾았습니다. 사진 속 글과 입력한 내용이 같은지(빠진 줄, 오타) 확인해 주세요.")
+    if not resolved and not loose_glyphs:
+        raise ExtractError("글씨를 학습할 수 있는 페이지가 없습니다.\n" + "\n".join(warnings))
 
     if profile_id:
         directory = profile_dir(data_dir, profile_id)
@@ -207,9 +228,9 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None):
         with open(os.path.join(directory, "profile.json"), encoding="utf-8") as f:
             profile = json.load(f)
     else:
-        profile_id = secrets.token_hex(5)
+        profile_id = new_id or secrets.token_hex(5)
         directory = profile_dir(data_dir, profile_id)
-        os.makedirs(directory)
+        os.makedirs(directory, exist_ok=True)
         profile = {"id": profile_id, "created": time.time(), "box": T.BOX, "baseline": T.BASELINE,
                    "glyphs": [], "ink": None}
 
@@ -224,8 +245,17 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None):
             cv2.imwrite(os.path.join(directory, name), g.pop("mask"))
             g["file"] = name
             profile["glyphs"].append(g)
+    for g in loose_glyphs:
+        name = f"g{len(profile['glyphs']):04d}.png"
+        cv2.imwrite(os.path.join(directory, name), g.pop("mask"))
+        g["file"] = name
+        g["source"] = "freeform"
+        profile["glyphs"].append(g)
+    if report and report.get("ink"):
+        inks.append(report["ink"])
     if inks:
         profile["ink"] = np.median(inks, axis=0).tolist()
+    profile["report"] = report
     with open(os.path.join(directory, "profile.json"), "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False)
     if not profile["glyphs"]:

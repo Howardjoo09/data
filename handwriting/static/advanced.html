@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>손글씨 노트 변환기 (프로토타입)</title>
+<title>손글씨 노트 변환기 · 고급</title>
 <style>
   body { font-family: system-ui, "Malgun Gothic", sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; line-height: 1.5; }
   section { border: 1px solid #ccc; border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
@@ -21,7 +21,8 @@
 </style>
 </head>
 <body>
-<h1>손글씨 노트 변환기 <small class="muted">프로토타입</small></h1>
+<h1>손글씨 노트 변환기 <small class="muted">고급</small></h1>
+<p><a href="/">← 간단 변환 페이지 (PDF + 글씨체 파일 → 바로 변환)</a></p>
 <p class="muted">① 템플릿을 인쇄해 내 글씨로 채우고 → ② 사진/스캔을 올려 글씨체를 학습시킨 뒤 → ③ 글이나 PDF를 넣으면 내 글씨로 쓴 노트 PDF를 만들어 줍니다.</p>
 
 <section>
@@ -41,7 +42,9 @@
 <section>
   <h2>② 작성한 템플릿 올리기 (글씨체 학습)</h2>
   <div class="row"><input type="file" id="tplFiles" multiple accept="image/*,.pdf"></div>
-  <div class="row muted">사진(JPG·PNG)이나 스캔 PDF. 여러 쪽이면 한 번에 모두 고르세요. 네 모서리의 검은 표식이 모두 보여야 합니다.</div>
+  <div class="row muted">사진(JPG·PNG)이나 스캔 PDF. 여러 쪽이면 한 번에 모두 고르세요. 네 모서리의 검은 표식이 모두 보여야 합니다.
+    템플릿이 아니라 자유롭게 쓴 손글씨라면 아래에 사진 속 글을 그대로 입력하세요.</div>
+  <textarea id="transcript" placeholder="(자유롭게 쓴 손글씨일 때만) 사진에 적힌 내용"></textarea>
   <div class="row">
     <label>템플릿 ID (페이지 코드 인식 실패 시만) <input id="tplHint" size="10"></label>
     <label><input type="checkbox" id="extend"> 현재 글씨체에 글자 추가</label>
@@ -142,6 +145,7 @@ $("profBtn").onclick = async () => {
   const form = new FormData();
   for (const f of files) form.append("files", f);
   form.append("template_id", $("tplHint").value);
+  form.append("transcript", $("transcript").value);
   if ($("extend").checked) form.append("extend_profile", $("profileId").value);
   show($("profMsg"), "글씨를 읽는 중… (사진이 크면 몇 초 걸립니다)");
   try {
