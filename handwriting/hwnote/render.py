@@ -439,6 +439,21 @@ def _extend_ends(centre, binary, dist, radius):
             t += 0.5
 
 
+def pen_glyph(glyph_mask, scale, angle, elastic, rng, aspect, target):
+    """Scale a glyph to output size and draw it with the uniform pen.  Small letters (formula
+    symbols, indices) are drawn at up to 3x and reduced afterwards, so the humps of an m or the
+    dot of an i do not melt together while the centre line is traced."""
+    height = glyph_mask.shape[0] * scale
+    f = int(np.clip(np.ceil(70.0 / max(height, 1.0)), 1, 3))
+    mask, pad = _transform(glyph_mask, scale * f, angle, elastic, rng, aspect)
+    mask = uniform_pen(mask, target * f)
+    if f > 1:
+        h, w = mask.shape
+        mask = cv2.resize(mask, (max(1, w // f), max(1, h // f)), interpolation=cv2.INTER_AREA)
+        mask = np.clip(mask * 1.15, 0, 1)
+    return mask
+
+
 def normalize_pen(mask, target):
     """Make the strokes of a rendered glyph ``target`` px wide on average, by growing or
     shrinking them evenly from their edges.  Unlike redrawing the centre line, this keeps
@@ -519,8 +534,7 @@ class Renderer:
             # Same pen width for every character, so letters copied, assembled from jamo or
             # taken from the fallback font all match -- the strokes themselves are kept.
             aspect = (HANGUL_ASPECT if category == "hangul" else 1.0) * self.p.char_width.get(ch, 1.0)
-            mask, _ = _transform(glyph.mask, scale, angle, elastic, rng, aspect)
-            mask = uniform_pen(mask, self.target_stroke)
+            mask = pen_glyph(glyph.mask, scale, angle, elastic, rng, aspect, self.target_stroke)
         else:
             mask, _ = _transform(glyph.mask, scale, angle, elastic, rng,
                                  HANGUL_ASPECT if category == "hangul" else 1.0)

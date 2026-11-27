@@ -14,12 +14,13 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, PX, GlyphFactory, Options, _crisp, _paper, uniform_pen,
+from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, WORD_GAP, PX, GlyphFactory, Options, _crisp, _paper, pen_glyph,
                      _transform)
 
 DELIMS = set("()[]{}|")
 WIDE_OPS = set("=+-×÷±∓→←⇒⇐⇔<>≤≥≠≈~∈∉⊂∪∩·⋯")
 HANGUL_HEIGHT = 0.84  # handwritten syllable height as a fraction of the printed font size
+MATH_GAP = 0.05       # space between packed formula characters, as a fraction of the font size
 BIG_OPS = {"Σ": 0.95, "∫": 1.15}
 PIECE_TO_DELIM = {"⎧": "{", "⎨": "{", "⎩": "{", "⎪": "{", "⎫": "}", "⎬": "}", "⎭": "}",
                   "⎡": "[", "⎣": "[", "⎢": "[", "⎤": "]", "⎦": "]", "⎥": "]"}
@@ -117,12 +118,36 @@ class PageWriter:
                 s *= float(np.clip((typical[1] / ink_h) ** o.evenness, 0.8, 1.25))
         return glyph, cat, s
 
+    def _plan_symbol(self, c):
+        """Glyph and scale (px per profile-mm) of a non-Hangul character: decided once, so
+        the line can be packed with the width it will really be drawn at."""
+        k = self.k
+        em = c.size * k
+        x0, y0, x1, y1 = (v * k for v in c.bbox)
+        glyph, cat = self.factory.get(c.ch)
+        ink_h = max(glyph.h - 4 / PX, 0.3)
+        ink_w = max(glyph.w - 4 / PX, 0.3)
+        if c.ch in DELIMS:
+            tall = (y1 - y0) > 1.6 * em
+            s = (0.92 * (y1 - y0) if tall else 0.82 * em) / ink_h
+        elif c.ch in BIG_OPS:
+            s = BIG_OPS[c.ch] * em / ink_h
+        elif c.ch in WIDE_OPS:
+            # Operators are sized by the printed symbol's width (written small in a box).
+            s = min(0.72 * (x1 - x0) / ink_w, 0.55 * em / ink_h)
+        elif c.ch in ("'", "″"):
+            s = 0.32 * em / ink_h
+        else:
+            glyph, cat, s = self._glyph(c.ch, 0.66 * em, "latin")
+            ink_w = max(glyph.w - 4 / PX, 0.3)
+        return glyph, s, ink_w * s / k  # width in points
+
     def _render(self, glyph, s, angle, aspect=1.0):
         """Pen-drawn mask of a glyph at ``s`` px per profile-mm, with its ink box."""
         scale = s / PX
         if self.o.stroke > 0:
-            mask, _ = _transform(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect)
-            mask = uniform_pen(mask, min(self.pen, 0.15 * glyph.h * s))
+            mask = pen_glyph(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect,
+                             min(self.pen, 0.15 * glyph.h * s))
         else:
             mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
             mask = _crisp(mask)
@@ -174,14 +199,14 @@ class PageWriter:
             gap = LETTER_GAP["hangul"] * o.letter_spacing + self.rng.normal(0, GAP_WANDER * o.messiness)
             x += (b - a + 1) + float(np.clip(gap, -0.07, 0.03)) * HANGUL_HEIGHT * em
 
-    def _reflow(self, chars, plans, body):
-        """Horizontal shift (points) per character for lines that are plain text.
+    def _reflow(self, chars, plans, sym, body):
+        """Horizontal shift (points) per character, packing each line like handwriting.
 
-        Packing a word's syllables saves space; on a plain line everything after the word moves
-        left by as much, as when writing by hand.  Lines with fractions, stacked limits or other
-        lines close above or below keep the printed positions, so equations stay aligned.
-        Sub- and superscripts move with the character before them."""
-        k = self.k
+        Print gives every syllable a full square and spreads formulas out; by hand both are
+        written closer.  Syllables of a word and the characters of a formula are packed with
+        the widths they are drawn at; a printed space becomes the writer's word gap.  Lines with
+        fractions or tall brackets, or crowded by other lines, keep their printed positions so
+        equations stay aligned.  Limits and dots written above or below a character move with it."""
         shift = {}
         main = sorted((c for c in chars if c.size >= 0.75 * body and c.ch not in (mathfont.FRACTION, mathfont.OVERDOT)),
                       key=lambda c: c.origin[1])
@@ -193,44 +218,69 @@ class PageWriter:
                 rows.append([c.origin[1], [c]])
         bands = [(min(c.bbox[1] for c in r[1]), max(c.bbox[3] for c in r[1])) for r in rows]
         stacked = [c.bbox for c in chars if c.ch == mathfont.FRACTION or (c.ch in DELIMS and c.size > 1.6 * body)]
-        gap = LETTER_GAP["hangul"] * HANGUL_HEIGHT * self.o.letter_spacing
+        small = [c for c in chars if c.size < 0.75 * body and c.ch not in (mathfont.FRACTION,)]
+        letter_gap = LETTER_GAP["hangul"] * HANGUL_HEIGHT * self.o.letter_spacing
+        k = self.k
         for i, (_, row) in enumerate(rows):
             top, bot = bands[i]
             near = any(j != i and bands[j][0] < bot + 0.3 * body and bands[j][1] > top - 0.3 * body
                        for j in range(len(rows)))
             if near or any(b[1] < bot and b[3] > top for b in stacked):
                 continue
-            row.sort(key=lambda c: c.bbox[0])
-            moved, n = 0.0, 0
-            while n < len(row):
-                c = row[n]
-                if not _is_hangul(c.ch):
-                    shift[id(c)] = moved
-                    n += 1
-                    continue
-                w = [c]
-                while n + len(w) < len(row) and _is_hangul(row[n + len(w)].ch) and _same_word(w[-1], row[n + len(w)]):
-                    w.append(row[n + len(w)])
-                for x in w:
-                    shift[id(x)] = moved
-                packed = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT
-                             * self.p.char_width.get(x.ch, 1.0) / k for x in w)
-                packed += gap * sum(x.size for x in w[1:])
-                moved += packed - (w[-1].bbox[2] - w[0].bbox[0])
-                n += len(w)
-            # Small characters riding on this line (exponents, indices) follow their base.
-            for c in chars:
-                if id(c) in shift or c.size >= 0.75 * body or c.ch == mathfont.FRACTION:
-                    continue
+            row_top = float(np.median([c.bbox[1] for c in row]))
+            row_bot = float(np.median([c.bbox[3] for c in row]))
+            riders, attached = [], []
+            for c in small:
                 mid = (c.bbox[1] + c.bbox[3]) / 2
-                if top - 0.5 * body <= mid <= bot + 0.5 * body:
-                    # Follow the line character it hangs on: the one above/below it (a limit
-                    # under "lim"), else the one just before it (an exponent).
-                    cx = (c.bbox[0] + c.bbox[2]) / 2
-                    over = [x for x in row if x.bbox[0] - 0.5 <= cx <= x.bbox[2] + 0.5]
-                    before = [x for x in row if x.bbox[0] <= cx]
-                    base = over[0] if over else (before[-1] if before else None)
-                    shift[id(c)] = shift.get(id(base), 0.0) if base else 0.0
+                if not (top - 0.5 * body <= mid <= bot + 0.5 * body):
+                    continue
+                if c.bbox[1] > row_bot - 0.15 * body or c.bbox[3] < row_top + 0.15 * body or id(c) not in sym:
+                    attached.append(c)   # under/over a character: a limit, a dot
+                else:
+                    riders.append(c)     # an exponent or index written in the line
+            seq = sorted(row + riders, key=lambda c: c.bbox[0])
+            units, n = [], 0
+            while n < len(seq):  # a Hangul word is one unit, every other character its own
+                w = [seq[n]]
+                if _is_hangul(seq[n].ch):
+                    while (n + len(w) < len(seq) and _is_hangul(seq[n + len(w)].ch)
+                           and _same_word(w[-1], seq[n + len(w)])):
+                        w.append(seq[n + len(w)])
+                units.append(w)
+                n += len(w)
+            cursor = None
+            for u, w in enumerate(units):
+                first, last = w[0], w[-1]
+                size = first.size
+                if _is_hangul(first.ch):
+                    width = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT
+                                * self.p.char_width.get(x.ch, 1.0) / k for x in w)
+                    width += letter_gap * sum(x.size for x in w[1:])
+                else:
+                    width = sym[id(first)][2] if id(first) in sym else (first.bbox[2] - first.bbox[0])
+                if cursor is None:
+                    start = first.bbox[0]
+                else:
+                    printed = first.bbox[0] - units[u - 1][-1].bbox[2]
+                    if printed > 0.25 * size:  # a space
+                        gap = WORD_GAP * HANGUL_HEIGHT * size * self.o.word_spacing
+                    else:
+                        gap = 0.3 * max(printed, 0.0) + MATH_GAP * size
+                    start = cursor + gap
+                    if printed > 1.5 * size:
+                        # A tab or a second column: keep it where it was printed, so columns
+                        # and items set side by side stay lined up.
+                        start = max(start, first.bbox[0])
+                if _is_hangul(first.ch):
+                    for x in w:
+                        shift[id(x)] = start - first.bbox[0]
+                else:
+                    shift[id(first)] = (start + width / 2) - (first.bbox[0] + first.bbox[2]) / 2
+                cursor = start + width
+            for c in attached:  # follow the character it is written above or below
+                cx = (c.bbox[0] + c.bbox[2]) / 2
+                base = min(row, key=lambda x: abs((x.bbox[0] + x.bbox[2]) / 2 - cx))
+                shift[id(c)] = shift.get(id(base), 0.0)
         return shift
 
     # ---------------------------------------------------------------- page
@@ -259,7 +309,9 @@ class PageWriter:
         # Each syllable's glyph is chosen up front so the line can be reflowed with its width.
         plans = {id(c): self._glyph(c.ch, HANGUL_HEIGHT * c.size * k, "hangul")
                  for c in chars if _is_hangul(c.ch)}
-        shift = self._reflow(chars, plans, body)
+        sym = {id(c): self._plan_symbol(c) for c in chars
+               if not _is_hangul(c.ch) and c.ch not in (mathfont.FRACTION, mathfont.OVERDOT)}
+        shift = self._reflow(chars, plans, sym, body)
         word = []  # consecutive Hangul of one word, written closer than print spaces them
 
         def flush():
@@ -290,26 +342,16 @@ class PageWriter:
                 cv2.circle(layer, (int((x0 + x1) / 2), int(cy)), max(1, int(self.pen * 0.6)), 1.0, -1, cv2.LINE_AA)
                 continue
             cx = (x0 + x1) / 2
-            glyph, cat = self.factory.get(c.ch)
-            ink_h = max(glyph.h - 4 / PX, 0.3)
-            ink_w = max(glyph.w - 4 / PX, 0.3)
+            glyph, s, _ = sym[id(c)]
             if c.ch in DELIMS:
                 tall = (y1 - y0) > 1.6 * em
-                s = (0.92 * (y1 - y0) if tall else 0.82 * em) / ink_h
                 centre_y = (y0 + y1) / 2 if tall else oy - 0.3 * em
                 self._draw(layer, glyph, s, angle, lambda a, b, t, u: (cx - (a + b) / 2, centre_y - (t + u) / 2))
-            elif c.ch in BIG_OPS:
-                s = BIG_OPS[c.ch] * em / ink_h
-                self._draw(layer, glyph, s, angle, lambda a, b, t, u: (cx - (a + b) / 2, oy - 0.3 * em - (t + u) / 2))
-            elif c.ch in WIDE_OPS:
-                # Operators are sized by the printed symbol's width (written small in a box).
-                s = min(0.72 * (x1 - x0) / ink_w, 0.55 * em / ink_h)
+            elif c.ch in BIG_OPS or c.ch in WIDE_OPS:
                 self._draw(layer, glyph, s, angle, lambda a, b, t, u: (cx - (a + b) / 2, oy - 0.3 * em - (t + u) / 2))
             elif c.ch in ("'", "″"):
-                s = 0.32 * em / ink_h
                 self._draw(layer, glyph, s, angle, lambda a, b, t, u: (cx - (a + b) / 2, oy - 0.72 * em - t))
             else:
-                glyph, cat, s = self._glyph(c.ch, 0.66 * em, "latin")
                 if c.ch in MID_LINE:
                     place = lambda a, b, t, u, em=em: (cx - (a + b) / 2, oy - 0.28 * em - (t + u) / 2)  # noqa: E731
                 else:
