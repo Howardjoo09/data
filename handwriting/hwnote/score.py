@@ -190,13 +190,31 @@ def isolated(profile, chars, seed=0):
     return out
 
 
-def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None):
+def _blur_to(image, factor):
+    """Lose detail as a picture ``factor`` times smaller would (and keep the size)."""
+    if factor >= 0.95:
+        return image
+    h, w = image.shape[:2]
+    small = cv2.resize(image, (max(1, int(round(w * factor))), max(1, int(round(h * factor)))),
+                       interpolation=cv2.INTER_AREA)
+    return cv2.resize(small, (w, h), interpolation=cv2.INTER_CUBIC)
+
+
+def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None, source_px_per_mm=None):
     """Compare the writer's ``images`` (one per line of ``lines``) with the program's writing
     of the same lines.  ``extra_own``: more of the writer's glyph masks by character, used only
-    to measure how much their own copies vary.  Returns a dict of figures."""
+    to measure how much their own copies vary.  ``source_px_per_mm``: resolution of the photo
+    the writer's lines came from; the program's writing is blurred to the same detail, so a
+    sharper picture is not mistaken for a different hand.  Returns a dict of figures."""
     text = "\n".join(lines)
     chars = [c for c in charsets.normalize_text(text) if not c.isspace()]
     yours, your_report = _glyphs(images, text)
+    detail = None
+    if source_px_per_mm:
+        from .copysheet import BAND_PX
+        h = _syllable_height(your_report)
+        if h:
+            detail = h / BAND_PX * source_px_per_mm  # px a syllable had in the writer's photo
     your_style = _layout(images, your_report)
     your_style["slant"] = slant(list(yours.values()))
     your_style["stroke_evenness"] = stroke_evenness(list(yours.values()))
@@ -216,10 +234,15 @@ def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None):
     distances, per_char, layouts, renders, mine_all = [], {}, [], [], {}
     for seed in seeds:
         crops = style.render_lines(profile, lines, seed=seed)
+        mine = isolated(profile, chars, seed)
+        if detail:
+            my_h = _syllable_height(_glyphs(crops, text)[1])
+            factor = detail / my_h if my_h else 1.0
+            crops = [_blur_to(c, factor) for c in crops]
+            mine = {n: _blur_to(m, factor) for n, m in mine.items()}
         _, my_report = _glyphs(crops, text)
         # Shapes are compared on characters drawn one at a time: cutting them out of tightly
         # spaced lines would add the cutting errors to the program's side only.
-        mine = isolated(profile, chars, seed)
         st = _layout(crops, my_report)
         st["slant"] = slant(list(mine.values()))
         st["stroke_evenness"] = stroke_evenness(list(mine.values()))

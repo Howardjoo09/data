@@ -227,7 +227,7 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
             if info.get("layout") == 2:  # copy sheet: keep only the sharp band crops
                 lines = info["pages"][page_no]
                 target = evaluation if page_no in info.get("eval_pages", []) else copies
-                target.append((copysheet.bands(image, H, len(lines)), lines))
+                target.append((copysheet.bands(image, H, len(lines)), lines, copysheet.source_resolution(H)))
             else:
                 pages.append((page, info["pages"][page_no]))
     resolved = pages

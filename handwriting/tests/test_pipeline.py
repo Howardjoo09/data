@@ -435,6 +435,18 @@ def copysheet_transcript(lines):
     return copysheet.transcript(lines)
 
 
+class SpacingTests(unittest.TestCase):
+    def test_formula_spaces_are_narrow_word_spaces_are_not(self):
+        # The writer writes (sinx)'=cosx and u=f(x), but keeps spaces between words and
+        # between a word and a formula.
+        self.assertTrue(render.is_formula_space("(sin", "x)'"))
+        self.assertTrue(render.is_formula_space("u", "="))
+        self.assertTrue(render.is_formula_space("=", "g(u)에"))
+        self.assertFalse(render.is_formula_space("함수", "u"))
+        self.assertFalse(render.is_formula_space("g(u)에", "대하여"))
+        self.assertFalse(render.is_formula_space("Squeeze", "Theorem"))
+
+
 class TextTests(unittest.TestCase):
     def test_pdf_paragraphs_are_rebuilt(self):
         doc = pymupdf.open()

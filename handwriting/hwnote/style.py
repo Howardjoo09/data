@@ -58,9 +58,11 @@ def from_boxes(boxes, spaces):
             if b["n"] != a["n"] + 1:
                 continue  # a character between them was not measured
             gap = (b["box"][0] - a["box"][2]) / h
+            both = charsets.is_syllable(a["char"]) and charsets.is_syllable(b["char"])
             if spaces[b["n"]]:
-                word_gaps.append(gap)
-            elif charsets.is_syllable(a["char"]) and charsets.is_syllable(b["char"]):
+                if both:  # between Hangul words (spaces in formulas are much narrower)
+                    word_gaps.append(gap)
+            elif both:
                 gaps.append(gap)
     med = lambda v: float(np.median(v)) if len(v) else float("nan")  # noqa: E731
     return {
@@ -117,10 +119,11 @@ def stroke_ratio(images, boxes):
     return float(np.median(widths)) / float(np.median(heights)) if widths else float("nan")
 
 
-def measure_rendered(profile, lines, seed=0, exact=False):
+def measure_rendered(profile, lines, seed=0, exact=False, detail_px=None):
     """Style figures of the program's own writing of ``lines`` (one line each).  By default
     the letters are cut back out of the image exactly as the writer's are, so both sides are
-    measured the same way; ``exact`` uses where the program actually put every character."""
+    measured the same way; ``exact`` uses where the program actually put every character.
+    ``detail_px``: px a syllable had in the writer's photo; the writing is blurred to match."""
     from . import render
     from .score import slant
     boxes, spaces, masks, images = [], [], [], []
@@ -129,6 +132,9 @@ def measure_rendered(profile, lines, seed=0, exact=False):
         r = render.Renderer(profile, strip_options(seed + i))
         r.record = []
         page = np.asarray(r.render(line)[0].convert("RGB"))
+        if detail_px and not exact:
+            from .score import _blur_to
+            page = _blur_to(page, detail_px / r.typical_ink_px)
         images.append(page)
         text = charsets.normalize_text(line)
         chars = [c for c in text if not c.isspace()]
@@ -200,7 +206,7 @@ def calibrate_layout(profile_dir, target=None, lines=None, rounds=5, seeds=(0,))
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
         profile = render.Profile(profile_dir)
-        figures = [measure_rendered(profile, lines, seed) for seed in seeds]
+        figures = [measure_rendered(profile, lines, seed, detail_px=target.get("detail_px")) for seed in seeds]
         tried, error = dict(layout), 0.0
         for key, goal in goals.items():
             figure, guess, (lo, hi), tol = LAYOUT_FIT[key]

@@ -34,7 +34,8 @@ def main():
     if not images:
         print("평가용 시트가 없습니다 (필사 시트 1쪽).")
         return
-    result = score.evaluate(render.Profile(directory), images, lines)
+    result = score.evaluate(render.Profile(directory), images, lines,
+                            source_px_per_mm=copysheet.evaluation_resolution(directory))
     print(score.report_text(result))
     os.makedirs(args.out, exist_ok=True)
     score.side_by_side(images, result["your_report"], result["renders"], result["render_report"],

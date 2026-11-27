@@ -811,6 +811,16 @@ class Renderer:
     def space(self):
         return WORD_GAP * self.hangul_h * self.o.word_spacing * self.r * (1 + self.rng.normal(0, 0.08 * self.o.messiness))
 
+    def space_between(self, before, after, count=1):
+        """Width (px) of a run of ``count`` spaces between the words ``before`` and ``after``.
+        Inside a formula the writer leaves almost no room ((sinx)'=cosx, u=f(x)); between
+        words, and between a word and a formula, a normal word space; a wider run of spaces
+        (separating two formulas) is kept wider."""
+        if count == 1 and is_formula_space(before, after):
+            share = FUNCTION_SPACE if before.lstrip("(") in FUNCTION_NAMES else FORMULA_SPACE
+            return share * self.hangul_h * self.r
+        return self.space() * min(3.0, 1.0 + 0.5 * (count - 1))
+
     def render(self, text, max_pages=40):
         o, r = self.o, self.r
         text = charsets.normalize_text(text)
@@ -823,16 +833,20 @@ class Renderer:
         lines = []
         for paragraph in text.split("\n"):
             current, x = [], 0.0
-            for token in re.findall(r"\S+| +", paragraph):
+            tokens = re.findall(r"\S+| +", paragraph)
+            for k, token in enumerate(tokens):
                 if token.isspace():
                     if current:
-                        current.append(None)
-                        x += self.space() * len(token)
+                        before = tokens[k - 1] if k else ""
+                        after = tokens[k + 1] if k + 1 < len(tokens) else ""
+                        gap = self.space_between(before, after, len(token))
+                        current.append(gap)
+                        x += gap
                     continue
                 word = [self.place(c) for c in token]
                 w = sum(g.width + g.gap for g in word)
                 if current and x + w > right - left:
-                    while current and current[-1] is None:
+                    while current and not isinstance(current[-1], Placed):
                         current.pop()
                     lines.append(current)
                     current, x = [], 0.0
@@ -864,8 +878,8 @@ class Renderer:
         jitter = VERTICAL_WANDER * mess * self.typical_ink_px
         spacer = InkSpacer(0.12 * self.typical_ink_px)
         for g in line:
-            if g is None:
-                x += self.space()
+            if not isinstance(g, Placed):  # a space, its width in px
+                x += g
                 spacer.reset()
                 continue
             y0 = int(round(baseline + g.drop + (rng.normal(0, jitter) if jitter else 0.0))) - g.bottom
@@ -881,6 +895,30 @@ class Renderer:
                 else:
                     self.record.append(None)
             x = x0 + g.left + g.width
+
+
+MATH_MARKS = set("=+-×÷±∓<>≤≥≠≈→←⇒⇐⇔∈∉⊂⊃∪∩∀∃'″|/^_∫Σ√∞Δ∂·()[]{}")
+FUNCTION_NAMES = {"sin", "cos", "tan", "sec", "csc", "cot", "ln", "log", "lim", "exp", "max", "min", "deg"}
+FORMULA_SPACE = 0.15   # a space inside a formula, of the Hangul height (the writer's x > 0)
+FUNCTION_SPACE = 0.04  # after sin, log ...: written as one word (sinx)
+
+
+def _formula_word(word):
+    word = word.strip(".,;:")
+    if not word or any(charsets.is_syllable(c) for c in word):
+        return False
+    return (any(c in MATH_MARKS or c.isdigit() for c in word) or len(word) == 1
+            or word.lstrip("(") in FUNCTION_NAMES)
+
+
+def is_formula_space(before, after):
+    """True for a space between two parts of a formula (not next to Hangul, and at least one
+    side looks like mathematics rather than an English word)."""
+    if not before or not after:
+        return False
+    if charsets.is_syllable(before[-1]) or charsets.is_syllable(after[0]):
+        return False
+    return _formula_word(before) or _formula_word(after)
 
 
 class InkSpacer:

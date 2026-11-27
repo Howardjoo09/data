@@ -13,7 +13,7 @@ import os
 import cv2
 import numpy as np
 
-from . import freeform
+from . import charsets, freeform
 from . import template as T
 from .extract import PX, darkness
 
@@ -65,6 +65,19 @@ def bands(image, H, n_lines):
     return out
 
 
+def source_resolution(H):
+    """Pixels per millimetre of the photo or scan itself (at the page centre): the bands are
+    cut out at BAND_PX, but cannot hold more detail than this."""
+    J = np.linalg.inv(H)
+    cx, cy = T.PAGE_W / 2 * PX, T.PAGE_H / 2 * PX
+    def at(x, y):
+        v = J @ np.array([x, y, 1.0])
+        return v[:2] / v[2]
+    dx = np.linalg.norm(at(cx + PX, cy) - at(cx, cy))
+    dy = np.linalg.norm(at(cx, cy + PX) - at(cx, cy))
+    return float(np.sqrt(dx * dy))
+
+
 def _has_writing(band):
     dark = darkness(band)
     return float((dark > 0.35).sum()) / BAND_PX ** 2 >= MIN_BAND_INK
@@ -86,14 +99,16 @@ def transcript(lines):
 
 
 def read_pages(pages):
-    """``pages``: ``[(band_images, lines)]`` (see :func:`bands`).  Returns ``(glyphs, report,
+    """``pages``: ``[(band_images, lines[, source px/mm])]`` (see :func:`bands`).  Returns ``(glyphs, report,
     band_images, lines)`` for the bands that were written in."""
-    images, used = [], []
-    for crops, lines in pages:
+    images, used, resolution = [], [], []
+    for crops, lines, *rest in pages:
         for band, line in zip(crops, lines):
             if _has_writing(band):
                 images.append(band)
                 used.append(line)
+                if rest and rest[0]:
+                    resolution.append(rest[0])
     if not images:
         return [], {"chars": 0, "learned": 0, "lines": 0}, [], []
     text, skip = transcript(used)
@@ -102,6 +117,11 @@ def read_pages(pages):
     report["style"] = measure(images, report)
     from .score import slant
     report["style"]["slant"] = slant([g["mask"].astype(np.float32) / 255 for g in glyphs])
+    # How much detail the photo held: px a typical syllable had in it (the program's writing is
+    # blurred to this when the two are compared; a blurred stroke measures wider).
+    heights = [b["box"][3] - b["box"][1] for b in report["boxes"] if charsets.is_syllable(b["char"])]
+    if resolution and heights:
+        report["style"]["detail_px"] = float(np.median(heights)) / BAND_PX * float(np.median(resolution))
     return glyphs, report, images, used
 
 
@@ -118,12 +138,12 @@ def save_evaluation(directory, pages):
     folder = os.path.join(directory, "evaluation")
     os.makedirs(folder, exist_ok=True)
     kept = []
-    for crops, lines in pages:
+    for crops, lines, *rest in pages:
         for band, line in zip(crops, lines):
             if _has_writing(band):
                 name = f"band{len(kept):02d}.png"
                 cv2.imwrite(os.path.join(folder, name), cv2.cvtColor(band, cv2.COLOR_RGB2BGR))
-                kept.append({"file": name, "text": line})
+                kept.append({"file": name, "text": line, "source_px_per_mm": rest[0] if rest else None})
     with open(os.path.join(folder, "lines.json"), "w", encoding="utf-8") as f:
         json.dump(kept, f, ensure_ascii=False, indent=1)
     return len(kept)
@@ -138,3 +158,14 @@ def load_evaluation(directory):
         kept = json.load(f)
     images = [cv2.cvtColor(cv2.imread(os.path.join(folder, k["file"])), cv2.COLOR_BGR2RGB) for k in kept]
     return images, [k["text"] for k in kept]
+
+
+def evaluation_resolution(directory):
+    """Pixels per mm of the photo the evaluation page came from, or None if not recorded."""
+    path = os.path.join(directory, "evaluation", "lines.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        values = [k.get("source_px_per_mm") for k in json.load(f)]
+    values = [v for v in values if v]
+    return float(np.median(values)) if values else None
