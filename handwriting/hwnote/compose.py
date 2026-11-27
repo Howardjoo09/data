@@ -10,9 +10,10 @@ from .charsets import BOTTOM_VOWELS, JAMO_PARTS, MIXED_VOWELS, RIGHT_VOWELS, dec
 
 WIDE_RIGHT = set("ㅐㅒㅔㅖ")
 
-# Jamo the writer draws larger in running notes than in template boxes (measured: an initial
-# ㅇ fills 56% of the syllable height in the notes, 40% in the template).
-NOTE_SIZE = {"ㅇ": 1.25}
+# Jamo the writer draws larger in running writing than in template boxes (measured on the
+# writer's own sentences: an initial ㅇ fills 48% of the syllable height there, 42% in the
+# full template).
+NOTE_SIZE = {"ㅇ": 1.14}
 
 # (initial, vowel, final) boxes for vowels written to the right of the initial.
 RIGHT = {False: ((0.00, 0.08, 0.58, 0.92), (0.52, 0.00, 1.00, 1.00), None),
@@ -519,12 +520,20 @@ def rebuild(ch, parts, size, composer, rng, swap_chance=0.35, jitter=0.025, scal
     for role, (jamo, piece, unit) in parts.items():
         if rng.random() < swap_chance:
             other = composer.swap(role, jamo, vclass, has_final)
-            if other is not None:
+            # Only swap in a copy drawn with a similar density of ink: a small, heavily inked
+            # ㅇ blown up to this size would read as a dot.
+            if other is not None and abs(_fill(other[0]) - _fill(piece)) <= 0.35 * _fill(piece):
                 piece = other[0]
-        grow = NOTE_SIZE.get(jamo, 1.0) ** 0.85  # inside a written syllable, a little gentler
+        grow = NOTE_SIZE.get(jamo, 1.0)
         j = (rng.normal(0, jitter), rng.normal(0, jitter), grow * (1 + rng.normal(0, scale_jitter)))
         _paste_shape(canvas, piece, unit, j)
     return canvas
+
+
+def _fill(mask):
+    """Share of a jamo's bounding box covered by ink."""
+    m, _, _ = tight(mask)
+    return float((m > 0.3).mean()) if m.size else 0.0
 
 
 def _paste_exact(canvas, mask, unit):

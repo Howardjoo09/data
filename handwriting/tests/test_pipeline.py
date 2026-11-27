@@ -283,6 +283,22 @@ class FreeformTests(unittest.TestCase):
         found = [dict(tall, n=i) for i in range(4)] + [{"char": "나", "line": 0, "top": 40, "bottom": 100, "n": 9}]
         self.assertEqual([g["n"] for g in freeform._even_heights(found)], [0, 1, 2, 3])  # 'an' learned as 나
 
+    def test_calibration_learns_from_a_sentence_sample(self):
+        from hwnote import style
+        data = os.path.join(self.tmp.name, "cal")
+        profile, _, _ = extract.build_profile(data, [(self.photo, "notes.jpg")], transcript=FREEFORM_TEXT)
+        path = extract.profile_dir(data, profile["id"])
+        text = FREEFORM_TEXT.split("\n")[0]
+        page, _ = make_sample.freeform_page(text, self.font, seed=8)
+        sample, rendered, corrections = style.calibrate(path, [page], text, rounds=1)
+        self.assertGreater(sample["syllables"], 20)
+        self.assertLess(abs(sample["width"] - rendered["width"]), 0.25)
+        with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["char_scale"], corrections)
+        self.assertTrue(all(0.7 <= v <= 1.3 for v in corrections.values()))
+        render.Renderer(render.Profile(path), render.Options(seed=1)).render(text)  # still renders
+
     def test_harvest_rejects_jamo_joined_into_one_stroke(self):
         from PIL import Image, ImageDraw
         img = Image.new("L", (100, 100), 0)

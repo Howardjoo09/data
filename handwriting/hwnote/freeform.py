@@ -525,8 +525,20 @@ def extract_freeform(images, transcript):
 
     glyphs = _normalise(found, pages)
     report = {"chars": len(chars), "learned": len(glyphs), "lines": line_no,
-              "positions": {g["n"]: g["center"] for g in found if "center" in g}}
+              "positions": {g["n"]: g["center"] for g in found if "center" in g},
+              # Ink boxes in analysis coordinates (x0, top, x1, bottom), for measuring style.
+              "boxes": [{"n": g["n"], "char": g["char"], "line": g["line"], "page": g["page"],
+                         "box": _ink_box(g)} for g in found],
+              "spaces": spaces}
     return glyphs, report
+
+
+def _ink_box(g):
+    ys, xs = np.nonzero(g["mask"] > 0.3)
+    if len(ys) == 0:
+        return (g["x0"], g["top"], g["x0"], g["bottom"])
+    return (int(g["x0"] + xs.min()), int(g["top"] + ys.min()), int(g["x0"] + xs.max() + 1),
+            int(g["top"] + ys.max() + 1))
 
 
 RIGHT_BAR_VOWELS = set("ㅏㅐㅑㅒㅓㅔㅕㅖㅣㅘㅙㅚㅝㅞㅟㅢ")

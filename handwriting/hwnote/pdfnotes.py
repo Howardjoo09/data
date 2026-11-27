@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (HANGUL_ASPECT, LETTER_GAP, MID_LINE, PX, GlyphFactory, Options, _crisp, _paper, _restroke,
+from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, PX, GlyphFactory, Options, _crisp, _paper, normalize_pen,
                      _transform)
 
 DELIMS = set("()[]{}|")
@@ -109,7 +109,7 @@ class PageWriter:
         o, rng, mess = self.o, self.rng, self.o.messiness
         glyph, cat = self.factory.get(ch)
         ref = self.p.hangul_h if cat == "hangul" else self.p.cap_h
-        s = height_px / ref * (1 + rng.normal(0, 0.015 * mess))  # px per profile-mm
+        s = height_px / ref * (1 + rng.normal(0, 0.015 * mess)) * self.p.char_scale.get(ch, 1.0)
         ink_h = glyph.h - 4 / PX
         if cat == "hangul" and charsets.is_syllable(ch) and o.evenness > 0:
             typical = self.factory._shape_size(ch)
@@ -121,10 +121,8 @@ class PageWriter:
         """Pen-drawn mask of a glyph at ``s`` px per profile-mm, with its ink box."""
         scale = s / PX
         if self.o.stroke > 0:
-            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, 0.004 * self.o.messiness,
-                                   self.rng, aspect)
-            radius = min(self.pen / 2, 0.075 * glyph.h * s)
-            mask = _restroke((centre > 0.12).astype(np.float32), max(0.5, radius - 0.5))
+            mask, _ = _transform(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect)
+            mask = normalize_pen(mask, min(self.pen, 0.15 * glyph.h * s))
         else:
             mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
             mask = _crisp(mask)
@@ -164,13 +162,17 @@ class PageWriter:
         for c in word:
             em = c.size * k
             glyph, cat, s = plans[id(c)]
-            mask, box = self._render(glyph, s, self.rng.normal(0, 0.6 * o.messiness), HANGUL_ASPECT)
+            mask, box = self._render(glyph, s, self.rng.normal(0, 0.6 * o.messiness),
+                                     HANGUL_ASPECT * self.p.char_width.get(c.ch, 1.0))
             if box is None:
                 continue
             a, b, t, u = box
-            bottom = c.origin[1] * k + 0.06 * em + self.rng.normal(0, 0.012 * em * o.messiness)
-            _stamp(layer_for(c.color), mask, int(round(x - a)), int(round(bottom - u)))
-            x += (b - a + 1) + LETTER_GAP["hangul"] * HANGUL_HEIGHT * em * o.letter_spacing
+            typical = HANGUL_HEIGHT * em * (self.p.hangul_h - 4 / PX) / self.p.hangul_h
+            centre = c.origin[1] * k + 0.06 * em - typical / 2
+            centre += self.rng.normal(0, VERTICAL_WANDER * o.messiness * typical)
+            _stamp(layer_for(c.color), mask, int(round(x - a)), int(round(centre - (t + u) / 2)))
+            gap = LETTER_GAP["hangul"] * o.letter_spacing + self.rng.normal(0, GAP_WANDER * o.messiness)
+            x += (b - a + 1) + float(np.clip(gap, -0.15, 0.15)) * HANGUL_HEIGHT * em
 
     def _reflow(self, chars, plans, body):
         """Horizontal shift (points) per character for lines that are plain text.
@@ -211,7 +213,8 @@ class PageWriter:
                     w.append(row[n + len(w)])
                 for x in w:
                     shift[id(x)] = moved
-                packed = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT / k for x in w)
+                packed = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT
+                             * self.p.char_width.get(x.ch, 1.0) / k for x in w)
                 packed += gap * sum(x.size for x in w[1:])
                 moved += packed - (w[-1].bbox[2] - w[0].bbox[0])
                 n += len(w)

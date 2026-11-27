@@ -53,6 +53,15 @@
   <div id="profMsg" class="msg"></div>
   <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button></div>
   <div id="sheetBox"></div>
+  <details class="row">
+    <summary>내 문장 샘플로 보정하기 (선택)</summary>
+    <p class="muted">평소처럼 문장 몇 줄을 쓴 사진과 그 내용을 올리면, 글자마다 크기·폭을 실제 필기에 맞춰 보정합니다.
+      템플릿 칸에는 크고 또박또박 쓰지만 실제 문장에서는 다르게 쓰는 글자(예: 으, 의)가 맞춰집니다.</p>
+    <div class="row"><input type="file" id="calFiles" multiple accept="image/*,.pdf"></div>
+    <textarea id="calText" placeholder="사진에 적힌 내용을 줄바꿈까지 그대로 입력"></textarea>
+    <div class="row"><button id="calBtn">보정하기</button></div>
+    <div id="calMsg" class="msg"></div>
+  </details>
 </section>
 
 <section>
@@ -156,6 +165,21 @@ $("profBtn").onclick = async () => {
     show($("profMsg"), text);
     showSheet(p);
   } catch (e) { show($("profMsg"), e.message, true); }
+};
+
+$("calBtn").onclick = async () => {
+  const id = $("profileId").value.trim();
+  if (!id) return show($("calMsg"), "먼저 글씨체를 학습시키거나 불러오세요.", true);
+  const form = new FormData();
+  for (const f of $("calFiles").files) form.append("sample", f);
+  form.append("transcript", $("calText").value);
+  show($("calMsg"), "샘플을 분석하고 비교하는 중… (10~30초)");
+  try {
+    const r = await call(`/api/profile/${encodeURIComponent(id)}/calibrate`, { method: "POST", body: form });
+    show($("calMsg"), `샘플에서 ${r.syllables}글자를 찾아 ${r.corrected}글자의 크기를 보정했습니다.\n` +
+      `글자 폭: 내 필기 ${r.sample.width} / 프로그램 ${r.program.width}, ` +
+      `글자 사이: ${r.sample.letter_gap} / ${r.program.letter_gap}, 단어 사이: ${r.sample.word_gap} / ${r.program.word_gap}`);
+  } catch (e) { show($("calMsg"), e.message, true); }
 };
 
 async function loadProfile(id) {

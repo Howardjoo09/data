@@ -13,7 +13,7 @@ import time
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from hwnote import charsets, extract, render, template as T, textio
+from hwnote import charsets, extract, render, style, template as T, textio
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get("HWNOTE_DATA", os.path.join(BASE, "data"))
@@ -149,6 +149,27 @@ def make_profile():
 def profile_info(profile_id):
     with open(os.path.join(_profile_path(profile_id), "profile.json"), encoding="utf-8") as f:
         return jsonify(_profile_summary(json.load(f)))
+
+
+@app.post("/api/profile/<profile_id>/calibrate")
+def calibrate_profile(profile_id):
+    """Tune a handwriting profile to a sample of the writer's own sentences (photo + text)."""
+    path = _profile_path(profile_id)
+    files = [f for f in request.files.getlist("sample") if f.filename]
+    transcript = request.form.get("transcript", "")[:MAX_TEXT]
+    if not files or not transcript.strip():
+        return _error("손글씨 문장 사진과, 그 사진에 적힌 내용을 함께 올려 주세요.")
+    try:
+        images = [img for f in files for img in extract.load_images(f.read(), f.filename)]
+    except extract.ExtractError as exc:
+        return _error(str(exc))
+    sample, rendered, corrections = style.calibrate(path, images, transcript)
+    if sample["syllables"] < 10:
+        return _error("사진에서 글자를 충분히 찾지 못했습니다. 손글씨만 반듯하게 찍고, 내용을 사진과 똑같이 입력해 주세요.")
+    keys = ["width", "letter_gap", "word_gap", "middle_spread", "height_spread"]
+    return jsonify({"syllables": sample["syllables"], "corrected": len(corrections),
+                    "sample": {k: round(sample[k], 3) for k in keys},
+                    "program": {k: round(rendered[k], 3) for k in keys}})
 
 
 @app.get("/api/profile/<profile_id>/sheet.png")
