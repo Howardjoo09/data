@@ -486,8 +486,10 @@ def _paper(opts, width, height, r, rng):
 
 
 def layout_bounds(opts):
-    """Y (mm) of the first and last ruled line that carries text."""
-    return 30.0, max(30.0, opts.page_height - 15.0)
+    """Y (mm) of the first and last ruled line that carries text (on grid paper, lines of
+    writing sit on grid lines)."""
+    top = 7 * GRID_STEP if opts.paper == "grid" else 30.0
+    return top, max(top, opts.page_height - 15.0)
 
 
 def _transform(mask, scale, angle, elastic, rng, aspect=1.0, shear=0.0):

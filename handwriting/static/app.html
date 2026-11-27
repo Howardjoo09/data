@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>손글씨 노트</title>
+<style>
+  :root {
+    --paper: #fbf9ed; --line: #e0dfd5; --ink: #22222a; --muted: #6b6a63; --accent: #2f5d8a;
+    --accent-soft: #e6eef6; --card: #ffffff; --border: #dcdad0; --error: #a8261b; --ok: #2e6b3a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: var(--ink); background: var(--paper);
+    background-image: linear-gradient(var(--line) 1px, transparent 1px),
+                      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 24px 24px;
+    font: 15px/1.55 system-ui, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+  main { max-width: 860px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  .lead { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px;
+          margin: 14px 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .card h2 { font-size: 16px; margin: 0 0 10px; }
+  .muted { color: var(--muted); font-size: 13.5px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 10px 0; }
+  button, .button {
+    font: inherit; border: 1px solid var(--border); background: #f6f5ef; color: var(--ink);
+    border-radius: 7px; padding: 7px 14px; cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  button:hover, .button:hover { background: #efede4; }
+  button.primary, .button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover, .button.primary:hover { background: #274f76; }
+  button:disabled { opacity: .5; cursor: default; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs button { border-radius: 7px 7px 0 0; }
+  .tabs button.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  textarea { width: 100%; min-height: 160px; font: inherit; padding: 10px; border: 1px solid var(--border);
+             border-radius: 7px; resize: vertical; }
+  input[type=text] { font: inherit; padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; }
+  select { font: inherit; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border); background: #fff; }
+  .drop { border: 2px dashed var(--border); border-radius: 9px; padding: 22px; text-align: center; color: var(--muted);
+          cursor: pointer; background: #fdfdfb; }
+  .drop.over { border-color: var(--accent); background: var(--accent-soft); }
+  .drop b { color: var(--ink); }
+  .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; background: #c9c7bd; }
+  .status-dot.on { background: var(--ok); }
+  .msg { white-space: pre-wrap; margin-top: 8px; }
+  .msg.error { color: var(--error); }
+  .bar { height: 10px; background: #ecebe4; border-radius: 6px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+  .pages { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-top: 12px; }
+  .pages a { display: block; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: #fff; }
+  .pages img { width: 100%; display: block; }
+  .hidden { display: none !important; }
+  label.choice { display: flex; gap: 8px; align-items: flex-start; margin: 6px 0; cursor: pointer; }
+  label.choice span small { display: block; color: var(--muted); }
+  footer { margin-top: 28px; }
+  @media (max-width: 560px) { .card { padding: 14px; } h1 { font-size: 22px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>손글씨 노트</h1>
+  <p class="lead">PDF나 글을 넣으면 내 글씨로 쓴 노트(PDF)로 바꿔 줍니다. 모든 처리는 이 컴퓨터 안에서 합니다.</p>
+
+  <section class="card" id="hand">
+    <h2><span class="status-dot" id="handDot"></span>내 글씨체</h2>
+    <div id="handNone">
+      <p class="muted">처음 한 번만 <b>글씨체 파일(.zip)</b>을 불러오면 됩니다. 이후에는 자동으로 기억합니다.</p>
+      <div class="row">
+        <button class="primary" id="importBtn">글씨체 파일 불러오기</button>
+        <a class="muted" href="/advanced">템플릿·필사 시트로 새로 만들기 →</a>
+      </div>
+    </div>
+    <div id="handSome" class="hidden">
+      <div id="handInfo"></div>
+      <div class="row">
+        <button id="importBtn2">다른 글씨체 불러오기</button>
+        <a class="button" href="/api/me/export">글씨체 파일 내보내기</a>
+        <a class="muted" href="/advanced">글자 고르기·추가 학습 →</a>
+      </div>
+    </div>
+    <input type="file" id="importFile" accept=".zip,application/zip" class="hidden">
+    <div class="msg" id="handMsg"></div>
+  </section>
+
+  <section class="card" id="convertCard">
+    <div class="tabs">
+      <button class="on" data-tab="pdf">PDF 변환</button>
+      <button data-tab="text">글 입력</button>
+    </div>
+
+    <div id="tab-pdf">
+      <div class="drop" id="drop"><b>PDF를 여기로 끌어 놓거나 눌러서 고르세요</b><br><span id="dropName">선택된 파일 없음</span></div>
+      <input type="file" id="pdfFile" accept=".pdf,application/pdf" class="hidden">
+      <label class="choice"><input type="radio" name="mode" value="layout" checked>
+        <span>원래 배치 그대로 <small>수식·분수·괄호·상자까지 같은 자리에 손으로 씁니다 (추천)</small></span></label>
+      <label class="choice"><input type="radio" name="mode" value="pdftext">
+        <span>글만 다시 쓰기 <small>PDF의 글을 꺼내 노트 줄에 이어서 씁니다 (글 위주 문서용)</small></span></label>
+      <div class="row" id="pageRow">
+        <label>쪽 범위 <input type="text" id="pages" placeholder="비우면 전체 (예: 29-31, 35)" size="26"></label>
+        <span class="muted" id="pageCount"></span>
+      </div>
+    </div>
+
+    <div id="tab-text" class="hidden">
+      <textarea id="text" placeholder="노트로 바꿀 글을 입력하거나 붙여 넣으세요."></textarea>
+      <div class="row">
+        <label>글씨 크기 <select id="size">
+          <option value="small">작게</option><option value="medium" selected>보통</option><option value="large">크게</option>
+        </select></label>
+      </div>
+    </div>
+
+    <div class="row">
+      <label>종이 <select id="paper">
+        <option value="grid" selected>모눈 (내 노트)</option><option value="lined">줄 노트</option><option value="blank">무지</option>
+      </select></label>
+      <button class="primary" id="go">손글씨 노트로 변환</button>
+    </div>
+    <div class="msg" id="goMsg"></div>
+  </section>
+
+  <section class="card hidden" id="result">
+    <h2 id="resultTitle">변환 중…</h2>
+    <div class="bar"><div id="barFill"></div></div>
+    <div class="row">
+      <span id="progress" class="muted"></span>
+      <a class="button primary hidden" id="pdfLink" href="#" target="_blank">PDF 열기 / 저장</a>
+    </div>
+    <div class="muted" id="saved"></div>
+    <div class="pages" id="pageList"></div>
+  </section>
+
+  <footer class="muted">
+    <a href="/advanced">고급 기능</a> · <a href="/quick">한 번에 변환 (글씨체 사진을 매번 올리는 방식)</a>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let tab = "pdf", pdfFile = null, hasHand = false, polling = null;
+
+function message(el, text, error) {
+  el.textContent = text || "";
+  el.classList.toggle("error", !!error);
+}
+
+async function call(url, options) {
+  const res = await fetch(url, options);
+  let body = {};
+  try { body = await res.json(); } catch (e) { /* not json */ }
+  if (!res.ok) throw new Error(body.error || `서버 오류 (${res.status})`);
+  return body;
+}
+
+// ---- my handwriting
+function showHand(p) {
+  hasHand = !!p;
+  $("handDot").classList.toggle("on", hasHand);
+  $("handNone").classList.toggle("hidden", hasHand);
+  $("handSome").classList.toggle("hidden", !hasHand);
+  if (p) {
+    $("handInfo").innerHTML = `등록됨 · 글자 <b>${p.chars}</b>종 (직접 쓴 한글 ${p.hangul}자 — 나머지 한글은 내 글씨의 자모로 조합), ` +
+      `글자 이미지 ${p.glyphs}개`;
+  }
+}
+
+async function loadHand() {
+  try { showHand((await call("/api/me")).profile); } catch (e) { message($("handMsg"), e.message, true); }
+}
+
+for (const id of ["importBtn", "importBtn2"]) $(id).onclick = () => $("importFile").click();
+$("importFile").onchange = async () => {
+  const file = $("importFile").files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("file", file);
+  message($("handMsg"), "불러오는 중…");
+  try {
+    showHand((await call("/api/me/import", { method: "POST", body: form })).profile);
+    message($("handMsg"), "글씨체를 불러왔습니다.");
+  } catch (e) { message($("handMsg"), e.message, true); }
+  $("importFile").value = "";
+};
+
+// ---- input
+document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => {
+  tab = b.dataset.tab;
+  document.querySelectorAll(".tabs button").forEach((x) => x.classList.toggle("on", x === b));
+  $("tab-pdf").classList.toggle("hidden", tab !== "pdf");
+  $("tab-text").classList.toggle("hidden", tab !== "text");
+});
+
+async function choosePdf(file) {
+  if (!file) return;
+  if (!/\.pdf$/i.test(file.name)) return message($("goMsg"), "PDF 파일을 골라 주세요.", true);
+  pdfFile = file;
+  $("dropName").textContent = file.name;
+  $("pageCount").textContent = "";
+  message($("goMsg"), "");
+  const form = new FormData();
+  form.append("document", file);
+  try { $("pageCount").textContent = `전체 ${(await call("/api/pdfinfo", { method: "POST", body: form })).pages}쪽`; }
+  catch (e) { message($("goMsg"), e.message, true); }
+}
+$("drop").onclick = () => $("pdfFile").click();
+$("pdfFile").onchange = () => choosePdf($("pdfFile").files[0]);
+$("drop").ondragover = (e) => { e.preventDefault(); $("drop").classList.add("over"); };
+$("drop").ondragleave = () => $("drop").classList.remove("over");
+$("drop").ondrop = (e) => { e.preventDefault(); $("drop").classList.remove("over"); choosePdf(e.dataTransfer.files[0]); };
+document.querySelectorAll("input[name=mode]").forEach((r) => r.onchange = () =>
+  $("pageRow").classList.toggle("hidden", r.value !== "layout" || !r.checked));
+
+// ---- convert
+$("go").onclick = async () => {
+  if (!hasHand) return message($("goMsg"), "먼저 위에서 내 글씨체 파일을 불러와 주세요.", true);
+  const form = new FormData();
+  form.append("paper", $("paper").value);
+  if (tab === "pdf") {
+    if (!pdfFile) return message($("goMsg"), "변환할 PDF를 골라 주세요.", true);
+    const mode = document.querySelector("input[name=mode]:checked").value;
+    form.append("document", pdfFile);
+    form.append("mode", mode === "layout" ? "layout" : "text");
+    form.append("pages", $("pages").value);
+  } else {
+    if (!$("text").value.trim()) return message($("goMsg"), "변환할 글을 입력해 주세요.", true);
+    form.append("mode", "text");
+    form.append("text", $("text").value);
+    form.append("size", $("size").value);
+  }
+  message($("goMsg"), "");
+  $("go").disabled = true;
+  try {
+    const { job } = await call("/api/jobs", { method: "POST", body: form });
+    startPolling(job);
+  } catch (e) {
+    message($("goMsg"), e.message, true);
+    $("go").disabled = false;
+  }
+};
+
+function startPolling(job) {
+  $("result").classList.remove("hidden");
+  $("resultTitle").textContent = "변환 중…";
+  $("pdfLink").classList.add("hidden");
+  $("pageList").innerHTML = "";
+  $("saved").textContent = "";
+  $("barFill").style.width = "0";
+  const started = Date.now();
+  let shown = 0;
+  clearInterval(polling);
+  polling = setInterval(async () => {
+    let s;
+    try { s = await call(`/api/jobs/${job}`); } catch (e) { return; }
+    const total = s.total || 0;
+    if (total) $("barFill").style.width = `${Math.round(100 * s.done / total)}%`;
+    const secs = (Date.now() - started) / 1000;
+    let text = total ? `${s.done} / ${total}쪽` : (s.state === "waiting" ? "기다리는 중…" : "쓰는 중…");
+    if (total && s.done > 0 && s.done < total) {
+      const left = Math.round(secs / s.done * (total - s.done));
+      text += ` · 약 ${left >= 60 ? Math.round(left / 60) + "분" : left + "초"} 남음`;
+    }
+    $("progress").textContent = text;
+    for (; shown < s.pages.length; shown++) {
+      const url = s.pages[shown];
+      $("pageList").insertAdjacentHTML("beforeend", `<a href="${url}" target="_blank"><img loading="lazy" src="${url}"></a>`);
+    }
+    if (s.state === "done" || s.state === "error") {
+      clearInterval(polling);
+      $("go").disabled = false;
+      if (s.state === "error") {
+        $("resultTitle").textContent = "변환하지 못했습니다";
+        message($("goMsg"), s.error, true);
+        return;
+      }
+      $("barFill").style.width = "100%";
+      $("resultTitle").textContent = `완성 — ${s.pages.length}쪽`;
+      $("progress").textContent = `${Math.round(secs)}초 걸림`;
+      $("pdfLink").href = s.pdf;
+      $("pdfLink").classList.remove("hidden");
+      if (s.saved) $("saved").textContent = `자동 저장: ${s.saved}`;
+    }
+  }, 800);
+}
+
+loadHand();
+</script>
+</body>
+</html>

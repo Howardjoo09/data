@@ -1,0 +1,64 @@
+name: Build HandNote (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, claude/vibrant-brahmagupta-fffts5]
+    paths:
+      - handwriting/**
+      - .github/workflows/handnote-app.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: handwriting
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install
+        run: python -m pip install -r requirements.txt pyinstaller==6.16.0
+      - name: Unit tests (informational on Windows)
+        continue-on-error: true
+        env:
+          PYTHONUTF8: '1'
+        run: python -m unittest discover -s tests
+      - name: App self-test from source
+        run: python desktop.py --self-test
+      - name: Build standalone executable
+        run: >
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name HandNote
+          --add-data "static;static" --add-data "templates;templates" --add-data "samples;samples"
+          --collect-all pymupdf --collect-submodules hwnote desktop.py
+      - name: Test standalone executable
+        shell: pwsh
+        run: |
+          $app = Start-Process -FilePath dist/HandNote.exe -ArgumentList '--self-test' -PassThru
+          if (-not $app.WaitForExit(300000)) {
+            Stop-Process -Id $app.Id -Force
+            throw 'Executable self-test timed out'
+          }
+          if ($app.ExitCode -ne 0) { throw "Executable self-test failed: $($app.ExitCode)" }
+          Get-Item dist/HandNote.exe | Select-Object Name, Length
+      - name: Retain executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: HandNote-Windows
+          path: handwriting/dist/HandNote.exe
+          if-no-files-found: error
+      - name: Publish download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view handnote *> $null
+          if ($LASTEXITCODE -eq 0) { gh release delete handnote --cleanup-tag --yes }
+          gh release create handnote dist/HandNote.exe --target $env:GITHUB_SHA --title 'HandNote (손글씨 노트) for Windows' --notes "Windows 10/11 standalone app (commit $($env:GITHUB_SHA.Substring(0, 8))). Download HandNote.exe and double-click; Python is not required. The browser opens the converter. Self-test (learn a sample handwriting, convert text and a PDF page, export/import) passed on the build machine." --latest=false
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

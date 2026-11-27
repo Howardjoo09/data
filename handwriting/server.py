@@ -4,18 +4,24 @@
 """
 import glob
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import shutil
+import sys
+import threading
 import time
+import zipfile
 
+import pymupdf
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from hwnote import charsets, extract, render, style, template as T, textio
+from hwnote import charsets, extract, pdfnotes, render, style, template as T, textio
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+# Inside the packaged app the program files are unpacked to a temporary folder.
+BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 DATA = os.environ.get("HWNOTE_DATA", os.path.join(BASE, "data"))
 MAX_TEXT = 20000
 OUTPUT_TTL = 24 * 3600
@@ -66,6 +72,12 @@ def _profile_summary(profile):
 
 @app.get("/")
 def index():
+    return send_file(os.path.join(BASE, "static", "app.html"))
+
+
+@app.get("/quick")
+def quick():
+    """The one-step page that learns the handwriting from the uploaded files each time."""
     return send_file(os.path.join(BASE, "static", "convert.html"))
 
 
@@ -349,6 +361,294 @@ def output_file(job, name):
     if not os.path.exists(path):
         abort(404)
     return send_file(path, download_name="handwritten_notes.pdf" if name.endswith(".pdf") else name)
+
+
+# --------------------------------------------------------------------------- my handwriting
+# The app remembers one handwriting ("내 글씨체") so it need not be uploaded every time.  It is
+# exchanged as a zip of the profile folder (profile.json + glyph images).
+
+PROFILE_FILE = re.compile(r"^(profile\.json|g\d{4,6}\.png)$")
+
+
+def _settings():
+    path = os.path.join(DATA, "settings.json")
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _save_settings(settings):
+    os.makedirs(DATA, exist_ok=True)
+    with open(os.path.join(DATA, "settings.json"), "w", encoding="utf-8") as f:
+        json.dump(settings, f, ensure_ascii=False)
+
+
+def _my_profile():
+    profile_id = _settings().get("profile_id")
+    if profile_id and PROFILE_RE.match(profile_id):
+        path = extract.profile_dir(DATA, profile_id)
+        if os.path.exists(os.path.join(path, "profile.json")):
+            return profile_id, path
+    return None, None
+
+
+@app.get("/api/me")
+def my_handwriting():
+    profile_id, path = _my_profile()
+    if not profile_id:
+        return jsonify({"profile": None})
+    with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+        return jsonify({"profile": _profile_summary(json.load(f))})
+
+
+@app.post("/api/me/import")
+def import_handwriting():
+    """Take a handwriting file (zip exported from this app) and make it my handwriting."""
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return _error("글씨체 파일(.zip)을 골라 주세요.")
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(upload.read()))
+    except zipfile.BadZipFile:
+        return _error("글씨체 파일이 아닙니다 (zip 파일이어야 합니다).")
+    members = {}
+    for info in archive.infolist():
+        name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if info.is_dir() or not PROFILE_FILE.match(name):
+            continue
+        if info.file_size > 20 * 1024 * 1024:
+            return _error("글씨체 파일 안에 너무 큰 파일이 있습니다.")
+        members[name] = archive.read(info)
+    if "profile.json" not in members:
+        return _error("글씨체 파일에 profile.json이 없습니다.")
+    try:
+        profile = json.loads(members["profile.json"].decode("utf-8"))
+        names = [g["file"] for g in profile["glyphs"]]
+    except (ValueError, KeyError, TypeError):
+        return _error("글씨체 파일의 profile.json을 읽을 수 없습니다.")
+    missing = [n for n in names if n not in members]
+    if missing:
+        return _error(f"글씨체 파일에 글자 이미지 {len(missing)}개가 빠져 있습니다.")
+    profile_id = profile.get("id") if PROFILE_RE.match(str(profile.get("id", ""))) else secrets.token_hex(5)
+    profile["id"] = profile_id
+    path = extract.profile_dir(DATA, profile_id)
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path)
+    for name, data in members.items():
+        if name != "profile.json":
+            with open(os.path.join(path, name), "wb") as f:
+                f.write(data)
+    with open(os.path.join(path, "profile.json"), "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False)
+    settings = _settings()
+    settings["profile_id"] = profile_id
+    _save_settings(settings)
+    return jsonify({"profile": _profile_summary(profile)})
+
+
+@app.post("/api/me/use/<profile_id>")
+def use_handwriting(profile_id):
+    """Make a profile built on the advanced page my handwriting."""
+    path = _profile_path(profile_id)
+    settings = _settings()
+    settings["profile_id"] = profile_id
+    _save_settings(settings)
+    with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+        return jsonify({"profile": _profile_summary(json.load(f))})
+
+
+@app.get("/api/me/export")
+def export_handwriting():
+    profile_id, path = _my_profile()
+    if not profile_id:
+        abort(404)
+    return send_file(io.BytesIO(profile_zip(path)), mimetype="application/zip",
+                     download_name=f"my_handwriting_{profile_id}.zip")
+
+
+def profile_zip(path):
+    """The handwriting file: profile.json and the glyph images it names."""
+    with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+        profile = json.load(f)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("profile.json", json.dumps(profile, ensure_ascii=False))
+        for g in profile["glyphs"]:
+            archive.write(os.path.join(path, g["file"]), g["file"])
+    return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- conversion jobs
+# A PDF page takes several seconds, so conversions run in the background, one at a time, and
+# the page asks how far they have got.
+
+JOBS = {}
+JOB_LOCK = threading.Lock()
+WORK_LOCK = threading.Lock()
+MAX_PAGES = 200
+
+
+def parse_pages(spec, count):
+    """'29-31, 35' -> [28, 29, 30, 34] (0-based); empty -> every page."""
+    spec = (spec or "").strip()
+    if not spec:
+        return list(range(count))
+    pages = []
+    for part in re.split(r"[,\s]+", spec):
+        if not part:
+            continue
+        m = re.fullmatch(r"(\d+)(?:\s*[-~]\s*(\d+))?", part)
+        if not m:
+            raise ValueError(f"쪽 번호를 읽을 수 없습니다: {part}")
+        a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+        if a < 1 or b < a or b > count:
+            raise ValueError(f"이 PDF는 1~{count}쪽입니다: {part}")
+        pages.extend(range(a - 1, b))
+    return list(dict.fromkeys(pages))
+
+
+def _job_update(job, **values):
+    with JOB_LOCK:
+        JOBS[job].update(values)
+
+
+def _save_copy(pdf_path, name):
+    """The desktop app keeps every result in a folder of the user's documents as well."""
+    folder = os.environ.get("HWNOTE_SAVE_DIR")
+    if not folder:
+        return None
+    os.makedirs(folder, exist_ok=True)
+    stem = re.sub(r"[\\/:*?\"<>|]+", "_", os.path.splitext(name or "")[0]).strip() or "글"
+    target = os.path.join(folder, f"{stem}_손글씨_{time.strftime('%Y%m%d_%H%M%S')}.pdf")
+    shutil.copyfile(pdf_path, target)
+    return target
+
+
+def _run_job(job, path, kind, payload, opts, pages, name=""):
+    out = os.path.join(DATA, "outputs", job)
+    doc = pymupdf.open()
+    urls = []
+
+    def add(image):
+        n = len(urls) + 1
+        name = f"page-{n}.jpg"
+        image.save(os.path.join(out, name), quality=90)
+        page = doc.new_page(width=595.28, height=841.89)
+        page.insert_image(page.rect, filename=os.path.join(out, name))
+        urls.append(f"/api/output/{job}/{name}")
+        _job_update(job, done=n, pages=list(urls))
+
+    try:
+        with WORK_LOCK:
+            _job_update(job, state="running", started=time.time())
+            profile = render.Profile(path)
+            if kind == "layout":
+                source = pymupdf.open(stream=payload, filetype="pdf")
+                writer = pdfnotes.PageWriter(profile, opts)
+                for i in pages:
+                    add(writer.write(source[i]))
+                source.close()
+            else:
+                renderer = render.Renderer(profile, opts)
+                images = renderer.render(payload)
+                _job_update(job, total=len(images))
+                for image in images:
+                    add(image)
+            doc.save(os.path.join(out, "notes.pdf"), garbage=3, deflate=True)
+        saved = _save_copy(os.path.join(out, "notes.pdf"), name)
+        _job_update(job, state="done", pdf=f"/api/output/{job}/notes.pdf", saved=saved, finished=time.time())
+    except Exception as exc:  # reported to the page instead of a silent stop
+        _job_update(job, state="error", error=f"변환 중 문제가 생겼습니다: {exc}")
+    finally:
+        doc.close()
+
+
+@app.post("/api/jobs")
+def start_job():
+    """Convert a PDF (keeping its layout, or rewriting its text) or typed text with my
+    handwriting.  Returns a job id; GET /api/jobs/<id> tells how far it has got."""
+    profile_id, path = _my_profile()
+    if request.form.get("profile_id"):
+        path = _profile_path(request.form.get("profile_id"))
+    elif not profile_id:
+        return _error("먼저 내 글씨체 파일을 불러와 주세요.")
+    form = request.form
+    paper = form.get("paper") if form.get("paper") in ("grid", "lined", "blank") else "grid"
+    kind = form.get("mode", "layout")
+    document = request.files.get("document")
+    if kind == "layout":
+        if not document or not document.filename:
+            return _error("변환할 PDF를 골라 주세요.")
+        payload = document.read()
+        try:
+            source = pymupdf.open(stream=payload, filetype="pdf")
+            count = source.page_count
+            source.close()
+        except Exception:
+            return _error("PDF를 열 수 없습니다.")
+        try:
+            pages = parse_pages(form.get("pages"), count)
+        except ValueError as exc:
+            return _error(str(exc))
+        if len(pages) > MAX_PAGES:
+            return _error(f"한 번에 {MAX_PAGES}쪽까지 변환할 수 있습니다.")
+        opts = render.Options(paper=paper, margin_line=False)
+        total = len(pages)
+    else:
+        if document and document.filename:
+            try:
+                payload = textio.extract_text(document.read(), document.filename, form.get("keep_lines") == "1")
+            except textio.TextError as exc:
+                return _error(str(exc))
+        else:
+            payload = form.get("text", "")
+        payload = payload.strip("\n")
+        problem = _check_text(payload)
+        if problem:
+            return _error(problem)
+        size = {"small": 0.45, "medium": 0.55, "large": 0.65}.get(form.get("size"), 0.55)
+        opts = render.Options(paper=paper, margin_line=paper == "lined", line_pitch=2 * render.GRID_STEP,
+                              size=size)
+        pages, total, kind = None, None, "text"
+    _prune_outputs()
+    job = secrets.token_hex(6)
+    os.makedirs(os.path.join(DATA, "outputs", job))
+    with JOB_LOCK:
+        JOBS[job] = {"id": job, "state": "waiting", "done": 0, "total": total, "pages": [], "pdf": None,
+                     "error": None, "created": time.time()}
+    name = document.filename if document and document.filename else "입력한 글"
+    threading.Thread(target=_run_job, args=(job, path, kind, payload, opts, pages, name), daemon=True).start()
+    return jsonify({"job": job})
+
+
+@app.get("/api/jobs/<job>")
+def job_status(job):
+    if not JOB_RE.match(job):
+        abort(404)
+    with JOB_LOCK:
+        if job not in JOBS:
+            abort(404)
+        return jsonify(dict(JOBS[job]))
+
+
+@app.post("/api/pdfinfo")
+def pdf_info():
+    upload = request.files.get("document")
+    if not upload or not upload.filename:
+        return _error("PDF를 골라 주세요.")
+    try:
+        doc = pymupdf.open(stream=upload.read(), filetype="pdf")
+        count = doc.page_count
+        doc.close()
+    except Exception:
+        return _error("PDF를 열 수 없습니다.")
+    return jsonify({"pages": count})
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"ok": True})
 
 
 _install_samples()

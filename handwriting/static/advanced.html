@@ -22,7 +22,7 @@
 </head>
 <body>
 <h1>손글씨 노트 변환기 <small class="muted">고급</small></h1>
-<p><a href="/">← 간단 변환 페이지 (PDF + 글씨체 파일 → 바로 변환)</a></p>
+<p><a href="/">← 손글씨 노트 첫 화면</a> · <a href="/quick">한 번에 변환 (글씨체 파일을 매번 올리는 방식)</a></p>
 <p class="muted">① 템플릿을 인쇄해 내 글씨로 채우고 → ② 사진/스캔을 올려 글씨체를 학습시킨 뒤 → ③ 글이나 PDF를 넣으면 내 글씨로 쓴 노트 PDF를 만들어 줍니다.</p>
 
 <section>
@@ -51,7 +51,8 @@
     <button id="profBtn">업로드하고 학습</button>
   </div>
   <div id="profMsg" class="msg"></div>
-  <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button></div>
+  <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button>
+    <button id="useProf">이 글씨체를 앱의 '내 글씨체'로 쓰기</button> <span id="useMsg" class="muted"></span></div>
   <div id="sheetBox"></div>
   <details class="row" id="pickBox">
     <summary>쓸 글자 고르기 (잘못 써진 글자 빼기)</summary>
@@ -226,6 +227,12 @@ async function loadProfile(id) {
   } catch (e) { show($("profMsg"), "글씨체를 불러오지 못했습니다: " + e.message, true); }
 }
 $("loadProf").onclick = () => loadProfile($("profileId").value.trim());
+$("useProf").onclick = async () => {
+  const id = $("profileId").value.trim();
+  if (!id) return;
+  const res = await fetch(`/api/me/use/${id}`, { method: "POST" });
+  $("useMsg").textContent = res.ok ? "완료 — 첫 화면에서 이 글씨체로 변환합니다." : "글씨체를 찾지 못했습니다.";
+};
 const saved = store.get("profileId");
 if (saved) { $("profileId").value = saved; loadProfile(saved); }
 

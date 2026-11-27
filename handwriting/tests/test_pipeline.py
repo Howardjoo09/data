@@ -206,6 +206,70 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(client.post("/api/render", json={"profile_id": "../../etc", "text": "x"}).status_code, 404)
         self.assertEqual(client.get("/api/output/abc/../../x").status_code, 404)
 
+    def test_app_my_handwriting_and_jobs(self):
+        import time
+        import zipfile
+        os.environ["HWNOTE_DATA"] = self.data
+        import server
+        server.DATA = self.data
+        client = server.app.test_client()
+        self.assertIn("손글씨 노트".encode(), client.get("/").data)
+        r = client.post("/api/jobs", data={"mode": "text", "text": "가나다"}, content_type="multipart/form-data")
+        if not client.get("/api/me").json["profile"]:
+            self.assertEqual(r.status_code, 400)  # no handwriting chosen yet
+        self.assertEqual(client.post(f"/api/me/use/{self.profile['id']}").status_code, 200)
+        archive = client.get("/api/me/export").data
+        with zipfile.ZipFile(io.BytesIO(archive)) as z:
+            self.assertIn("profile.json", z.namelist())
+        bad = io.BytesIO()
+        with zipfile.ZipFile(bad, "w") as z:
+            z.writestr("../profile.json", "{}")
+        r = client.post("/api/me/import", data={"file": (bad, "x.zip")}, content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+        r = client.post("/api/me/import", data={"file": (io.BytesIO(archive), "me.zip")},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 200, r.json)
+        self.assertEqual(r.json["profile"]["glyphs"], len(self.profile["glyphs"]))
+
+        def finish(job):
+            for _ in range(600):
+                state = client.get(f"/api/jobs/{job}").json
+                if state["state"] in ("done", "error"):
+                    return state
+                time.sleep(0.1)
+            self.fail("job did not finish")
+
+        r = client.post("/api/jobs", data={"mode": "text", "text": "Hello 세계\n광합성"},
+                        content_type="multipart/form-data")
+        state = finish(r.json["job"])
+        self.assertEqual(state["state"], "done", state)
+        self.assertTrue(client.get(state["pdf"]).data.startswith(b"%PDF"))
+        doc = pymupdf.open()
+        for text in ("1쪽 y = f(x)", "2쪽", "3쪽 광합성"):
+            page = doc.new_page()
+            page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
+            page.insert_text((72, 100), text, fontname="kr", fontsize=12)
+        pdf = doc.tobytes()
+        doc.close()
+        r = client.post("/api/pdfinfo", data={"document": (io.BytesIO(pdf), "d.pdf")}, content_type="multipart/form-data")
+        self.assertEqual(r.json["pages"], 3)
+        r = client.post("/api/jobs", data={"mode": "layout", "pages": "1, 3", "document": (io.BytesIO(pdf), "d.pdf")},
+                        content_type="multipart/form-data")
+        state = finish(r.json["job"])
+        self.assertEqual((state["state"], state["total"], len(state["pages"])), ("done", 2, 2), state)
+        r = client.post("/api/jobs", data={"mode": "layout", "pages": "4", "document": (io.BytesIO(pdf), "d.pdf")},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 400)
+
+    def test_page_ranges(self):
+        import server
+        self.assertEqual(server.parse_pages("", 3), [0, 1, 2])
+        self.assertEqual(server.parse_pages("29-31, 35", 58), [28, 29, 30, 34])
+        self.assertEqual(server.parse_pages("2~3 2", 5), [1, 2])
+        for bad in ("0", "3-1", "60", "x"):
+            with self.assertRaises(ValueError):
+                server.parse_pages(bad, 58)
+
 
 FREEFORM_TEXT = ("오늘은 생명과학 시간에 세포 호흡에 대해 배웠다. 세포 호흡은 포도당을 분해해서 에너지를 얻는 과정이다.\n"
                  "산소가 충분하면 ATP가 많이 만들어지지만, 부족하면 젖산 발효가 일어난다.\n"
