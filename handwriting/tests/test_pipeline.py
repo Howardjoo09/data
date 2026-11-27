@@ -155,6 +155,20 @@ class PipelineTests(unittest.TestCase):
         self.assertGreater((ink[int(288 * k):int(302 * k)] > 100).sum(), 50)     # second line kept its place
         self.assertLess((ink[int(150 * k):int(250 * k)] > 100).mean(), 0.001)  # nothing in between
 
+    def test_round_y_from_u_and_g(self):
+        directory = extract.profile_dir(self.data, self.profile["id"])
+        extract.set_letter_style(directory, "y", "round")
+        try:
+            profile = render.Profile(directory)
+            ys = profile.glyphs["y"]
+            self.assertEqual(len(ys), len(profile.glyphs["u"]) * len(profile.glyphs["g"]))
+            factory = render.GlyphFactory(profile, np.random.default_rng(0))
+            for y in ys:  # cup on the line, tail below it
+                self.assertGreater(factory.latin_drop("y", y, 1.0), 0.2 * (y.h - 0.4))
+            self.assertEqual(factory.latin_drop("u", profile.glyphs["u"][0], 1.0), 0.0)
+        finally:
+            extract.set_letter_style(directory, "y", None)
+
     def test_excluded_copies_are_not_used(self):
         directory = extract.profile_dir(self.data, self.profile["id"])
         files = [g["file"] for g in self.profile["glyphs"] if g["char"] == "a"]

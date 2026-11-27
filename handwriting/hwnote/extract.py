@@ -286,3 +286,20 @@ def set_excluded(directory, files, excluded=True):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(profile, f, ensure_ascii=False)
     return profile["excluded"]
+
+
+def set_letter_style(directory, ch, style):
+    """Draw ``ch`` in another way built from the writer's own letters (e.g. ``"round"`` for a
+    y made of their u and the tail of their g); ``None`` goes back to the template copies."""
+    path = os.path.join(directory, "profile.json")
+    with open(path, encoding="utf-8") as f:
+        profile = json.load(f)
+    styles = profile.get("letter_styles", {})
+    if style:
+        styles[ch] = style
+    else:
+        styles.pop(ch, None)
+    profile["letter_styles"] = styles
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False)
+    return styles

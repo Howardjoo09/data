@@ -108,7 +108,13 @@ class Profile:
                 continue
             self.glyphs.setdefault(g["char"], []).append(
                 Glyph(mask.astype(np.float32) / 255.0, g["top"], g["w"], g["h"]))
-        self._stats(data.get("baseline", 11.5))
+        baseline = data.get("baseline", 11.5)
+        # Letters rebuilt from other letters of the writer, e.g. a round y (see LETTER_STYLES).
+        for ch, how in data.get("letter_styles", {}).items():
+            built = LETTER_STYLES[how](self.glyphs, baseline) if how in LETTER_STYLES else []
+            if built:
+                self.glyphs[ch] = built
+        self._stats(baseline)
 
     def _stats(self, baseline):
         syll = [g for c, gs in self.glyphs.items() if charsets.is_syllable(c) for g in gs]
@@ -156,6 +162,67 @@ CLASS_SCALE = {"short": 1.15, "desc": 1.15, "tall": 1.0, "cap": 1.0}
 DELTA_OVER_SHORT = 1.05
 
 
+def _descender(glyph, baseline):
+    """The part of a glyph below the template baseline (the tail of a g) and where its stem
+    enters it.  Returns (tail mask, stem x) or None."""
+    row = int(round((baseline - glyph.top) * PX))
+    m = glyph.mask
+    if row <= 2 or row >= m.shape[0] - 4:
+        return None
+    tail = m[row - 1:].copy()
+    ink = np.nonzero(tail[:4].max(axis=0) > 0.3)[0]
+    if len(ink) == 0:
+        return None
+    return tail, float(ink.mean())
+
+
+def round_y(glyphs, baseline):
+    """A y written as a u whose right stroke runs on below the line into the curled tail of
+    the writer's g -- the usual handwritten y.  One copy per (u, g) pair, for variety."""
+    out = []
+    for u in glyphs.get("u", []):
+        um = u.mask
+        rows = np.nonzero(um.max(axis=1) > 0.3)[0]
+        if len(rows) == 0:
+            continue
+        lower = um[rows[0] + int(0.6 * (rows[-1] - rows[0])):rows[-1] + 1]
+        cols = np.nonzero(lower.max(axis=0) > 0.3)[0]
+        if len(cols) == 0:
+            continue
+        u_bottom = rows[-1]
+        # the right stroke of the u: rightmost ink in its lower part, ignoring an exit flick
+        right = np.nonzero(um[rows[0]:rows[-1] + 1].max(axis=0) > 0.3)[0]
+        x_u = float(np.percentile(right, 85))
+        for g in glyphs.get("g", []):
+            found = _descender(g, baseline)
+            if found is None:
+                continue
+            tail, x_t = found
+            dx = int(round(x_u - x_t))
+            left = min(0, dx)
+            width = max(um.shape[1], tail.shape[1] + dx) - left
+            height = u_bottom + 1 + tail.shape[0]
+            canvas = np.zeros((height, width), np.float32)
+            canvas[:um.shape[0], -left:-left + um.shape[1]] = np.maximum(
+                canvas[:um.shape[0], -left:-left + um.shape[1]], um[:height])
+            region = canvas[u_bottom:u_bottom + tail.shape[0], dx - left:dx - left + tail.shape[1]]
+            np.maximum(region, tail[:region.shape[0], :region.shape[1]], out=region)
+            # join the u's right stroke to the tail's stem
+            pen = max(2, int(round(stroke_width(um))))
+            stem_rows = np.nonzero(um[:, int(x_u)] > 0.3)[0] if 0 <= int(x_u) < um.shape[1] else []
+            y_from = int(stem_rows.max()) if len(stem_rows) else u_bottom
+            cv2.line(canvas, (int(round(x_u)) - left, y_from), (int(round(x_t)) + dx - left, u_bottom + 2), 1.0, pen,
+                     cv2.LINE_AA)
+            cropped, r0, _ = tight(canvas)
+            cropped = cv2.copyMakeBorder(cropped, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
+            top = u.top + (rows[0] - 2) / PX + (r0 - rows[0]) / PX
+            out.append(Glyph(cropped, top, cropped.shape[1] / PX, cropped.shape[0] / PX))
+    return out
+
+
+LETTER_STYLES = {"round": round_y}
+
+
 def latin_class(ch):
     if ch == "Δ":
         return "delta"
@@ -165,7 +232,7 @@ def latin_class(ch):
         return "short"
     if ch in "bdhklt":
         return "tall"
-    if ch in "gpqyηβμ":
+    if ch in "gpqyjηβμ":
         return "desc"
     return None
 
@@ -229,11 +296,14 @@ class GlyphFactory:
 
     def latin_drop(self, ch, glyph, s):
         """How far (in the units of ``s``) the ink bottom of a Latin letter goes below the line:
-        letters rest exactly on it, so a line's letters share one bottom; only punctuation keeps
-        its own place (a comma hangs a little below)."""
+        letters rest exactly on it, so a line's letters share one bottom, except that the tails
+        of g p q y hang below it; punctuation keeps its own place."""
         cls = latin_class(ch)
+        if cls == "desc":  # g p q y: the tail goes below the line, as far as the writer's own
+            own = (glyph.top + glyph.h - self.p.latin_bottom) / max(glyph.h - 4 / PX, 0.1)
+            return float(np.clip(own, 0.25, 0.55)) * (glyph.h - 4 / PX) * s
         if cls is not None:
-            return 0.0  # g p y too: every letter's lowest point is on the line
+            return 0.0  # every other letter's lowest point is on the line
         return (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s
 
     def skeleton(self, glyph):
