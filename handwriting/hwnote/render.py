@@ -547,29 +547,51 @@ def skeleton(mask):
     return centre
 
 
+def _thin_tables():
+    """Zhang-Suen thinning decisions for every 3x3 neighbourhood, one table per sub-step.
+    A neighbourhood is coded by its eight neighbours P2..P9 (north, then clockwise) as bits
+    0..7; the table says whether the centre pixel is removed."""
+    tables = np.zeros((2, 256), bool)
+    for code in range(256):
+        p = [(code >> k) & 1 for k in range(8)]  # P2 P3 P4 P5 P6 P7 P8 P9
+        neighbours = sum(p)
+        ring = p + p[:1]
+        turns = sum(1 for a, b in zip(ring, ring[1:]) if a == 0 and b == 1)
+        p2, p4, p6, p8 = p[0], p[2], p[4], p[6]
+        base = 2 <= neighbours <= 6 and turns == 1
+        tables[0, code] = base and p2 * p4 * p6 == 0 and p4 * p6 * p8 == 0
+        tables[1, code] = base and p2 * p4 * p8 == 0 and p2 * p6 * p8 == 0
+    return tables
+
+
+_THIN_TABLES = _thin_tables()
+# Weights that turn a pixel's neighbourhood into its table index (P2 = 1 ... P9 = 128).
+_THIN_KERNEL = np.array([[128, 1, 2], [64, 0, 4], [32, 16, 8]], np.float32)
+
+
 def _thin(binary):
-    img = np.pad(binary.astype(np.uint8), 1)
+    """Zhang-Suen thinning to a one-pixel centre line.  Each sub-step looks up every pixel's
+    neighbourhood in a table (one filter pass) instead of comparing the eight neighbours
+    array by array -- the same result, several times faster; it runs once per letter."""
+    img = (np.asarray(binary) != 0).astype(np.uint8)
+    if not img.any():
+        return img.astype(np.float32)
+    ys, xs = np.nonzero(img)
+    y0, x0 = ys.min(), xs.min()
+    work = np.pad(img[y0:ys.max() + 1, x0:xs.max() + 1], 1)
     while True:
         changed = False
         for step in (0, 1):
-            P = np.pad(img, 1)
-            p2, p3, p4 = P[:-2, 1:-1], P[:-2, 2:], P[1:-1, 2:]
-            p5, p6, p7 = P[2:, 2:], P[2:, 1:-1], P[2:, :-2]
-            p8, p9 = P[1:-1, :-2], P[:-2, :-2]
-            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
-            neighbours = sum(n.astype(np.int16) for n in ring[:8])
-            turns = sum(((a == 0) & (b == 1)).astype(np.int16) for a, b in zip(ring, ring[1:]))
-            if step == 0:
-                side = (p2 * p4 * p6 == 0) & (p4 * p6 * p8 == 0)
-            else:
-                side = (p2 * p4 * p8 == 0) & (p2 * p6 * p8 == 0)
-            remove = (img == 1) & (neighbours >= 2) & (neighbours <= 6) & (turns == 1) & side
+            code = cv2.filter2D(work, cv2.CV_16S, _THIN_KERNEL, borderType=cv2.BORDER_CONSTANT)
+            remove = (work == 1) & _THIN_TABLES[step][code]
             if remove.any():
-                img[remove] = 0
+                work[remove] = 0
                 changed = True
         if not changed:
             break
-    return img[1:-1, 1:-1].astype(np.float32)
+    out = np.zeros_like(img, dtype=np.float32)
+    out[y0:ys.max() + 1, x0:xs.max() + 1] = work[1:-1, 1:-1]
+    return out
 
 
 def uniform_pen(mask, target):

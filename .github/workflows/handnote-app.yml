@@ -32,26 +32,38 @@ jobs:
         run: python -m unittest discover -s tests
       - name: App self-test from source
         run: python desktop.py --self-test
-      - name: Build standalone executable
+      - name: Build single-file executable
         run: >
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name HandNote
           --add-data "static;static" --add-data "templates;templates" --add-data "samples;samples"
           --collect-all pymupdf --collect-submodules hwnote desktop.py
-      - name: Test standalone executable
+      - name: Build folder version (starts faster, nothing to unpack at each start)
+        run: >
+          python -m PyInstaller --noconfirm --onedir --windowed --name HandNote --distpath dist-folder
+          --add-data "static;static" --add-data "templates;templates" --add-data "samples;samples"
+          --collect-all pymupdf --collect-submodules hwnote desktop.py
+      - name: Test both executables
         shell: pwsh
         run: |
-          $app = Start-Process -FilePath dist/HandNote.exe -ArgumentList '--self-test' -PassThru
-          if (-not $app.WaitForExit(300000)) {
-            Stop-Process -Id $app.Id -Force
-            throw 'Executable self-test timed out'
+          foreach ($exe in @('dist/HandNote.exe', 'dist-folder/HandNote/HandNote.exe')) {
+            $start = Get-Date
+            $app = Start-Process -FilePath $exe -ArgumentList '--self-test' -PassThru
+            if (-not $app.WaitForExit(300000)) {
+              Stop-Process -Id $app.Id -Force
+              throw "$exe self-test timed out"
+            }
+            if ($app.ExitCode -ne 0) { throw "$exe self-test failed: $($app.ExitCode)" }
+            "{0}: self-test passed in {1:N1}s" -f $exe, ((Get-Date) - $start).TotalSeconds
           }
-          if ($app.ExitCode -ne 0) { throw "Executable self-test failed: $($app.ExitCode)" }
-          Get-Item dist/HandNote.exe | Select-Object Name, Length
-      - name: Retain executable
+          Compress-Archive -Path dist-folder/HandNote -DestinationPath dist/HandNote-win.zip
+          Get-ChildItem dist | Select-Object Name, Length
+      - name: Retain executables
         uses: actions/upload-artifact@v4
         with:
           name: HandNote-Windows
-          path: handwriting/dist/HandNote.exe
+          path: |
+            handwriting/dist/HandNote.exe
+            handwriting/dist/HandNote-win.zip
           if-no-files-found: error
       - name: Publish download
         shell: pwsh
@@ -60,5 +72,5 @@ jobs:
         run: |
           gh release view handnote *> $null
           if ($LASTEXITCODE -eq 0) { gh release delete handnote --cleanup-tag --yes }
-          gh release create handnote dist/HandNote.exe --target $env:GITHUB_SHA --title 'HandNote (손글씨 노트) for Windows' --notes "Windows 10/11 standalone app (commit $($env:GITHUB_SHA.Substring(0, 8))). Download HandNote.exe and double-click; Python is not required. The browser opens the converter. Self-test (learn a sample handwriting, convert text and a PDF page, export/import) passed on the build machine." --latest=false
+          gh release create handnote dist/HandNote-win.zip dist/HandNote.exe --target $env:GITHUB_SHA --title 'HandNote (손글씨 노트) for Windows' --notes "Windows 10/11 app (commit $($env:GITHUB_SHA.Substring(0, 8))); Python is not required. HandNote-win.zip: unzip once and run HandNote.exe inside the folder (starts fastest). HandNote.exe: single file, unpacks itself at every start. The browser opens the converter. Self-test (learn a sample handwriting, convert text and three PDF pages in parallel workers, export/import) passed with both on the build machine." --latest=false
           if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }

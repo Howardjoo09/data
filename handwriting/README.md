@@ -13,15 +13,18 @@ PDF나 글을 넣으면 **내 손글씨로 쓴 노트 필기 PDF**로 바꿔 주
 
 ## Windows 앱으로 쓰기
 
-1. [HandNote.exe 내려받기](https://github.com/Howardjoo09/data/releases/download/handnote/HandNote.exe)
-   (Python 설치가 필요 없습니다. 서명되지 않은 프로그램이라 처음에 "Windows의 PC 보호" 창이 뜨면
-   **추가 정보 → 실행**을 누르세요.)
+1. [HandNote-win.zip 내려받기](https://github.com/Howardjoo09/data/releases/download/handnote/HandNote-win.zip)
+   → 압축을 한 번 풀고, 폴더 안의 `HandNote.exe`를 실행합니다 (바탕화면에 바로 가기를 만들어 두면 편합니다).
+   파일 하나짜리 [HandNote.exe](https://github.com/Howardjoo09/data/releases/download/handnote/HandNote.exe)도
+   있지만, 켤 때마다 160MB를 임시 폴더에 풀기 때문에 시작이 느립니다.
+   Python 설치는 필요 없습니다. 서명되지 않은 프로그램이라 처음에 "Windows의 PC 보호" 창이 뜨면
+   **추가 정보 → 실행**을 누르세요.
 2. 더블클릭하면 작은 창이 뜨고 브라우저에 변환 화면이 열립니다. 작은 창을 닫으면 끝납니다.
 3. 처음 한 번만 **글씨체 파일 불러오기**로 내 글씨체 파일(`.zip`)을 고릅니다. 이후에는 기억합니다.
 4. PDF를 끌어 놓거나 글을 입력하고 **손글씨 노트로 변환**을 누릅니다. 진행률이 보이고, 끝나면
    **PDF 열기 / 저장**을 누르면 됩니다. 결과는 `문서\손글씨노트` 폴더에도 자동으로 저장됩니다.
 
-PDF 한 쪽은 몇 초 걸립니다 (미적분 노트 58쪽 전체는 몇 분). 글씨체 파일은 내 손글씨 이미지이므로 저장소에
+PDF는 여러 쪽을 CPU 코어 수만큼 동시에 씁니다. 4코어 컴퓨터에서 한 쪽에 약 1초 (미적분 노트 58쪽 전체 약 1분). 글씨체 파일은 내 손글씨 이미지이므로 저장소에
 올리지 않고 따로 보관합니다 — 앱의 **글씨체 파일 내보내기**로 언제든 다시 받을 수 있습니다.
 앱의 데이터는 `%LOCALAPPDATA%\HandNote`에 있습니다.
 

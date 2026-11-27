@@ -184,17 +184,22 @@ def self_test():
         assert state["saved"] and os.path.exists(state["saved"]), state
 
         doc = pymupdf.open()
-        page = doc.new_page()
-        page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
-        page.insert_text((72, 100), "합성함수의 미분법: y = f(x) 이면 dy/dx", fontname="kr", fontsize=12)
+        for text in ("합성함수의 미분법: y = f(x) 이면 dy/dx", "2쪽 sin x", "3쪽 lim", "4쪽 끝"):
+            page = doc.new_page()
+            page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
+            page.insert_text((72, 100), text, fontname="kr", fontsize=12)
         pdf = doc.tobytes()
         doc.close()
-        assert _request(f"{base}/api/pdfinfo", files={"document": ("t.pdf", pdf)})["pages"] == 1
-        job = _request(f"{base}/api/jobs", data={"mode": "layout", "pages": "1", "paper": "grid"},
+        assert _request(f"{base}/api/pdfinfo", files={"document": ("t.pdf", pdf)})["pages"] == 4
+        job = _request(f"{base}/api/jobs", data={"mode": "layout", "pages": "1-3", "paper": "grid"},
                        files={"document": ("t.pdf", pdf)})["job"]
         state = _wait(base, job)
-        assert state["state"] == "done" and len(state["pages"]) == 1, state
+        assert state["state"] == "done" and len(state["pages"]) == 3, state
         assert _request(f"{base}{state['pdf']}")[:5] == b"%PDF-"
+        # Several pages are written at once by worker processes (this program run again).
+        if server.pageworker.worker_count() > 1 and os.environ.get("HWNOTE_WORKERS") != "1":
+            assert server._POOL, "page workers did not start"
+            print(f"page workers: {server.pageworker.worker_count()}")
 
         archive = _request(f"{base}/api/me/export")
         again = _request(f"{base}/api/me/import", files={"file": ("me.zip", archive)})["profile"]
@@ -206,6 +211,8 @@ def self_test():
 
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()  # page-writing workers re-run this program
     if "--self-test" in sys.argv:
         try:
             sys.exit(self_test())

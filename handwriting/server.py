@@ -18,7 +18,7 @@ import zipfile
 import pymupdf
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from hwnote import charsets, extract, pdfnotes, render, style, template as T, textio
+from hwnote import charsets, extract, pageworker, render, style, template as T, textio
 
 # Inside the packaged app the program files are unpacked to a temporary folder.
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -525,15 +525,58 @@ def _save_copy(pdf_path, name):
     return target
 
 
+_POOL = None
+
+
+def _pool():
+    """Worker processes for writing PDF pages, started once and kept (None: write here)."""
+    global _POOL
+    if _POOL is None and pageworker.worker_count() > 1 and os.environ.get("HWNOTE_WORKERS") != "1":
+        try:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            _POOL = ProcessPoolExecutor(pageworker.worker_count(), mp_context=multiprocessing.get_context("spawn"))
+        except Exception:
+            _POOL = False
+    return _POOL or None
+
+
+def _layout_pages(path, pdf_path, pages, opts, seed):
+    """JPEG bytes of the written pages, in order, as they become ready.  If the worker
+    processes fail (cannot start, or one is killed), the remaining pages are written here."""
+    global _POOL
+    work = [(i, seed + i) for i in pages]
+    done = 0
+    pool = _pool()
+    if pool is not None:
+        try:
+            futures = [pool.submit(pageworker.write_page, path, pdf_path, i, opts, s) for i, s in work]
+            for future in futures:
+                yield future.result()
+                done += 1
+        except Exception:
+            from concurrent.futures.process import BrokenProcessPool
+            _POOL = False
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            if not isinstance(sys.exc_info()[1], BrokenProcessPool):
+                raise
+    for i, s in work[done:]:
+        yield pageworker.write_page(path, pdf_path, i, opts, s)
+
+
 def _run_job(job, path, kind, payload, opts, pages, name=""):
     out = os.path.join(DATA, "outputs", job)
     doc = pymupdf.open()
     urls = []
 
-    def add(image):
+    def add(jpeg):
         n = len(urls) + 1
         name = f"page-{n}.jpg"
-        image.save(os.path.join(out, name), quality=90)
+        with open(os.path.join(out, name), "wb") as f:
+            f.write(jpeg)
         page = doc.new_page(width=595.28, height=841.89)
         page.insert_image(page.rect, filename=os.path.join(out, name))
         urls.append(f"/api/output/{job}/{name}")
@@ -542,19 +585,21 @@ def _run_job(job, path, kind, payload, opts, pages, name=""):
     try:
         with WORK_LOCK:
             _job_update(job, state="running", started=time.time())
-            profile = render.Profile(path)
             if kind == "layout":
-                source = pymupdf.open(stream=payload, filetype="pdf")
-                writer = pdfnotes.PageWriter(profile, opts)
-                for i in pages:
-                    add(writer.write(source[i]))
-                source.close()
+                source = os.path.join(out, "source.pdf")
+                with open(source, "wb") as f:
+                    f.write(payload)
+                for jpeg in _layout_pages(path, source, pages, opts, int(job[:6], 16)):
+                    add(jpeg)
+                os.remove(source)
             else:
-                renderer = render.Renderer(profile, opts)
+                renderer = render.Renderer(render.Profile(path), opts)
                 images = renderer.render(payload)
                 _job_update(job, total=len(images))
                 for image in images:
-                    add(image)
+                    buf = io.BytesIO()
+                    image.save(buf, "JPEG", quality=90)
+                    add(buf.getvalue())
             doc.save(os.path.join(out, "notes.pdf"), garbage=3, deflate=True)
         saved = _save_copy(os.path.join(out, "notes.pdf"), name)
         _job_update(job, state="done", pdf=f"/api/output/{job}/notes.pdf", saved=saved, finished=time.time())
