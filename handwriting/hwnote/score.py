@@ -33,10 +33,14 @@ from .render import _thin
 SIZE = 64             # characters are compared in a SIZE x SIZE box
 TOLERANCE = 0.08      # a stroke point "matches" within this share of the box
 SHAPE_WEIGHT = 0.6
-# Layout figure -> how far off (absolute, in syllable heights) costs about a third of its score.
-LAYOUT = {"width": 0.08, "letter_gap": 0.05, "word_gap": 0.12, "height_spread": 0.03,
-          "baseline_spread": 0.03, "top_spread": 0.03, "stroke": 0.012, "stroke_evenness": 0.08,
-          "slant": 2.0}
+# Layout figure -> a just-noticeable difference (in syllable heights; degrees for slant).  A
+# figure scores exp(-(difference / jnd)^2): differences at the level of measuring noise cost
+# almost nothing, one jnd costs 63 %, two cost 98 %.
+LAYOUT = {"width": 0.05, "letter_gap": 0.02, "word_gap": 0.08, "height_spread": 0.03,
+          "baseline_spread": 0.03, "top_spread": 0.03, "stroke": 0.008, "stroke_evenness": 0.06,
+          "slant": 1.5}
+# Dots and ticks have no shape worth comparing (the centre line of a dot is a point).
+NO_SHAPE = set(".,'`·:;\"")
 NEATER_IS_FINE = {"height_spread", "baseline_spread", "top_spread", "stroke_evenness"}
 HOG_SIZE = 48
 
@@ -200,7 +204,8 @@ def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None):
     # How far apart the writer's own copies of a character are.
     by_char = {}
     for n, m in yours.items():
-        by_char.setdefault(chars[n], []).append(m)
+        if chars[n] not in NO_SHAPE:
+            by_char.setdefault(chars[n], []).append(m)
     for ch, masks in (extra_own or {}).items():
         if ch in by_char:
             by_char[ch] = by_char[ch] + list(masks)
@@ -222,13 +227,13 @@ def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None):
         renders.append((crops, my_report))
         for n, m in mine.items():
             mine_all.setdefault(n, []).append(m)
-            if n in yours:
+            if n in yours and chars[n] not in NO_SHAPE:
                 d = chamfer(m, yours[n])
                 distances.append(d)
                 per_char.setdefault(chars[n], []).append(d)
     mine_level = float(np.mean(distances)) if distances else float("nan")
     closeness = min(1.0, own_level / mine_level) if distances and not np.isnan(own_level) else 0.0
-    accuracy = distinguishability(yours, mine_all)
+    accuracy = distinguishability({n: m for n, m in yours.items() if chars[n] not in NO_SHAPE}, mine_all)
     hidden = 1.0 - 2.0 * max(0.0, accuracy - 0.5) if not np.isnan(accuracy) else closeness
     shape_score = (closeness + hidden) / 2
 
@@ -241,7 +246,7 @@ def evaluate(profile, images, lines, seeds=(0, 1), extra_own=None):
             diff = 0.0
         if np.isnan(diff):
             continue
-        layout_scores[key] = float(np.exp(-diff / tol))
+        layout_scores[key] = float(np.exp(-(diff / tol) ** 2))
         figures[key] = (your_v, mine_v)
     layout_score = float(np.mean(list(layout_scores.values()))) if layout_scores else 0.0
     total = SHAPE_WEIGHT * shape_score + (1 - SHAPE_WEIGHT) * layout_score

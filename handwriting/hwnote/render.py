@@ -93,6 +93,11 @@ def _fallback_font(size):
 
 
 NATURAL_SOURCES = {"copy", "freeform"}
+# Punctuation on the line: share of its own height that hangs below the line.  In the template
+# boxes the writer put the full stop a little above the dotted line, which raised it to the
+# middle of the letters before it.
+SITTING_MARKS = {".": 0.0, ",": 0.35}
+PUNCT_ROOM = 0.09  # least room before . and , (of the Hangul height), as in the writer's lines
 MIN_NATURAL = 2
 
 
@@ -322,6 +327,8 @@ class GlyphFactory:
             return float(np.clip(own, 0.25, 0.55)) * (glyph.h - 4 / PX) * s
         if cls is not None:
             return 0.0  # every other letter's lowest point is on the line
+        if ch in SITTING_MARKS:  # a full stop sits on the line, a comma hangs a little below
+            return SITTING_MARKS[ch] * (glyph.h - 4 / PX) * s
         return (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s
 
     def skeleton(self, glyph):
@@ -515,6 +522,7 @@ class Placed:
     width: float      # px, width of the ink (advance before the gap)
     drop: float       # px, how far the ink bottom sits below the baseline
     gap: float        # px, space after the glyph
+    room: float = 0.0  # px, least ink-free room before this glyph (a full stop is not tucked in)
 
 
 def skeleton(mask):
@@ -796,8 +804,9 @@ class Renderer:
         gap = (LETTER_GAP[category] * o.letter_spacing + rng.normal(0, GAP_WANDER * mess)) * self.hangul_h
         # Neighbours may touch, not overlap much; a gap inside a word never looks like a space.
         gap = float(np.clip(gap, -0.08 * self.hangul_h, 0.0))
+        room = PUNCT_ROOM * self.hangul_h * self.r if ch in SITTING_MARKS else 0.0
         return Placed(mask, int(cols[0]), int(rows[-1]), float(cols[-1] - cols[0] + 1), drop,
-                      gap * self.r)
+                      gap * self.r, room)
 
     def space(self):
         return WORD_GAP * self.hangul_h * self.o.word_spacing * self.r * (1 + self.rng.normal(0, 0.08 * self.o.messiness))
@@ -861,7 +870,7 @@ class Renderer:
                 continue
             y0 = int(round(baseline + g.drop + (rng.normal(0, jitter) if jitter else 0.0))) - g.bottom
             target = (INK_GAP * self.o.letter_spacing + rng.normal(0, 0.012 * mess)) * self.typical_ink_px
-            x0 = spacer.place(g.mask, y0, int(round(x)) - g.left, target)
+            x0 = spacer.place(g.mask, y0, int(round(x)) - g.left, max(target, g.room))
             _composite(page, g.mask, x0, y0, ink)
             if self.record is not None:  # exact ink box of every character, for measuring
                 rows = np.nonzero(g.mask.max(axis=1) > 0.3)[0]
