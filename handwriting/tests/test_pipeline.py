@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
-from hwnote import charsets, compose, extract, freeform, render, template as T, textio  # noqa: E402
+from hwnote import charsets, compose, copysheet, extract, freeform, render, template as T, textio  # noqa: E402
 import make_sample  # noqa: E402
 
 
@@ -367,6 +367,42 @@ class FreeformTests(unittest.TestCase):
         self.assertIn("내용", r.json["error"])
         r = client.post("/api/convert", data={"text": "x"})
         self.assertEqual(r.status_code, 400)
+
+
+class CopySheetTests(unittest.TestCase):
+    def test_copy_sheet_is_learned_line_by_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "data")
+            os.makedirs(os.path.join(data, "templates"))
+            info = {"id": 100003, "layout": 2, "eval_pages": [1], "pages": [
+                T.wrap_copy_text(["수열의 수렴과 발산을 판정하는 방법에는 여러 가지가 있다. 함수 f(x)의 극한값을 "
+                                  "구할 때에는 식을 변형한다. (sin x)' = cos x 이고 x^2 의 도함수는 2x 이다."]),
+                ["미분가능한 두 함수에 대하여 합성함수도 미분가능하다."]]}
+            with open(os.path.join(data, "templates", "100003.json"), "w", encoding="utf-8") as f:
+                json.dump(info, f, ensure_ascii=False)
+            pdf = T.build_pdf(info)
+            font = font_file(tmp)
+            uploads = []
+            for n, lines in enumerate(info["pages"]):
+                page = make_sample.fill_copy_page(pdf, n, lines, font, seed=n, hangul_mm=3.0)
+                uploads.append((make_sample.fake_photo(page, seed=n), f"p{n}.jpg"))
+            profile, _, warnings = extract.build_profile(data, uploads)
+            report = profile["copy_report"]
+            text, skip = copysheet_transcript(info["pages"][0])
+            self.assertEqual(len(skip), 1)  # the exponent 2 is found but not learned as a 2
+            self.assertGreater(report["learned"], 0.6 * report["chars"])
+            learned = "".join(g["char"] for g in profile["glyphs"])
+            self.assertIn("수", learned)
+            self.assertTrue(all(g["source"] == "copy" for g in profile["glyphs"]))
+            # The evaluation page is kept for comparison, not learned.
+            directory = extract.profile_dir(data, profile["id"])
+            images, lines = copysheet.load_evaluation(directory)
+            self.assertEqual(lines, info["pages"][1])
+            self.assertTrue(any("평가용" in w for w in warnings))
+
+
+def copysheet_transcript(lines):
+    return copysheet.transcript(lines)
 
 
 class TextTests(unittest.TestCase):

@@ -156,6 +156,40 @@ def freeform_photo(page, truth, seed=0, angle=None):
     return jpeg.tobytes(), moved
 
 
+def fill_copy_page(pdf_bytes, page_no, lines, font_path, seed=0, ink=(20, 20, 30), hangul_mm=2.7,
+                   skip_rows=()):
+    """Copy every printed line of a copy sheet into the grid below it, at note size."""
+    rng = np.random.default_rng(seed + page_no)
+    page = Image.fromarray(T.render_page_image(pdf_bytes, page_no, SCALE))
+    draw = ImageDraw.Draw(page)
+    probe = ImageFont.truetype(font_path, 100)
+    box = probe.getbbox("가")
+    em = 100 * hangul_mm * SCALE / (box[3] - box[1])
+    fonts = {}
+
+    def font(size):
+        key = int(round(size))
+        if key not in fonts:
+            fonts[key] = ImageFont.truetype(font_path, key)
+        return fonts[key]
+
+    for row, line in enumerate(lines):
+        if row in skip_rows:
+            continue
+        _, band, bottom = T.copy_row(row)
+        x = (T.COPY_X0 + 3 + rng.normal(0, 0.5)) * SCALE
+        base = (bottom - 0.9 + rng.normal(0, 0.2)) * SCALE
+        for ch, kind in T.parse_markup(line):
+            size = em * rng.uniform(0.95, 1.05) * (0.6 if kind != "normal" else 1.0)
+            if ch == " ":
+                x += 0.45 * em
+                continue
+            dy = -0.45 * em if kind == "sup" else 0.2 * em if kind == "sub" else 0.0
+            draw.text((x, base + dy + rng.normal(0, 0.03 * em)), ch, font=font(size), fill=ink, anchor="ls")
+            x += font(size).getlength(ch) + 0.06 * em
+    return np.asarray(page)
+
+
 def make(data_dir, font_path, set_keys, custom_text="", seed=0, skip=0.02):
     """Create a template in ``data_dir`` and return ``(info, [jpeg bytes per page])``."""
     info = T.new_template(data_dir, charsets.build_charlist(set_keys, custom_text))

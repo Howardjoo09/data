@@ -12,6 +12,8 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from hwnote import template as T  # noqa: E402
 
+import copy_text  # noqa: E402  (same folder)
+
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "templates")
 
 # One page to try the writing tool (iPad or paper) before filling in the full template.
@@ -62,8 +64,32 @@ OFFICIAL = {
 }
 
 
+COPY_ID = 100003
+
+
+def copy_sheet_pages():
+    """Pages of the copy sheets: the evaluation page first (held out from learning, used to
+    measure the result), then prose and formula pages alternating while both last."""
+    per = T.COPY_ROWS
+    chunk = lambda lines: [lines[i:i + per] for i in range(0, len(lines), per)]  # noqa: E731
+    prose = chunk(T.wrap_copy_text(copy_text.PROSE))
+    formulas = chunk(T.wrap_copy_text(copy_text.FORMULAS, width=150.0))
+    evaluation = chunk(T.wrap_copy_text(copy_text.EVALUATION, width=150.0))
+    assert len(evaluation) == 1, "the evaluation text must fit on one page"
+    pages = evaluation[:]
+    order = [prose[0]] + formulas[:1] + prose[1:2] + formulas[1:2] + prose[2:] + formulas[2:]
+    pages.extend(order)
+    return pages
+
+
 def build():
     os.makedirs(OUT, exist_ok=True)
+    pages = copy_sheet_pages()
+    info = {"id": COPY_ID, "layout": 2, "name": "필사 시트", "official": True, "eval_pages": [0],
+            "pages": pages}
+    with open(os.path.join(OUT, f"{COPY_ID}.json"), "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=1)
+    print(COPY_ID, "copy sheets", sum(len(p) for p in pages), "lines,", len(pages), "page(s)")
     for template_id, (name, chars, variants) in OFFICIAL.items():
         chars = list(chars)
         if not variants:

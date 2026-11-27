@@ -31,10 +31,47 @@ LABEL_H = 4.5            # printed label strip above every box
 BASELINE = 11.5          # dotted baseline, measured from the top of the box
 CELLS_PER_PAGE = COLS * ROWS
 
+# Copy sheets (layout 2): a printed line to copy, then two squares of note-book grid to write
+# it in, as in the writer's notes.  Rows sit on the same 4.24 mm grid the renderer draws.
+GRID_STEP = 4.24
+COPY_X0, COPY_X1 = 17.0, 193.0          # grid area, mm
+COPY_FIRST = 9                          # first row starts on grid line 9 (38.2 mm)
+COPY_ROWS = 18
+COPY_ROW = 3                            # grid squares per row: 1 printed + 2 to write in
+COPY_TEXT_PT = 8.5
+COPY_WRAP = 125.0                       # printed lines are at most this long (mm)
+GRID_PAPER = (251 / 255, 249 / 255, 237 / 255)
+GRID_LINE = (224 / 255, 223 / 255, 213 / 255)
+
 INK_GRAY = (0.45, 0.45, 0.45)
 BORDER = (0.62, 0.72, 0.88)
 GUIDE = (0.78, 0.86, 1.0)
 PT = 72.0 / 25.4         # points per millimetre
+
+
+def copy_row(index):
+    """(top of the printed strip, top of the writing band, bottom of the band) in mm."""
+    top = (COPY_FIRST + index * COPY_ROW) * GRID_STEP
+    return top, top + GRID_STEP, top + COPY_ROW * GRID_STEP
+
+
+def parse_markup(line):
+    """Split a copy-sheet line into ``[(char, kind)]``; ``^x`` is a superscript and ``_x`` a
+    subscript character, everything else is ``"normal"``."""
+    out, i = [], 0
+    while i < len(line):
+        c = line[i]
+        if c in "^_" and i + 1 < len(line):
+            out.append((line[i + 1], "sup" if c == "^" else "sub"))
+            i += 2
+        else:
+            out.append((c, "normal"))
+            i += 1
+    return out
+
+
+def plain_text(line):
+    return "".join(c for c, _ in parse_markup(line))
 
 
 def cell_box(index):
@@ -116,28 +153,34 @@ def _rect(x, y, w, h):
     return pymupdf.Rect(x * PT, y * PT, (x + w) * PT, (y + h) * PT)
 
 
+def _markers(shape, template_id, page_no):
+    """Corner markers (drawn module by module, 6x6 with the black border) and the page code."""
+    dictionary = cv2.aruco.getPredefinedDictionary(MARKER_DICT)
+    for marker_id, (mx, my) in MARKERS.items():
+        modules = cv2.aruco.generateImageMarker(dictionary, marker_id, 6)
+        m = MARKER_SIZE / 6
+        for r in range(6):
+            for c in range(6):
+                if modules[r, c] < 128:
+                    shape.draw_rect(_rect(mx + c * m, my + r * m, m, m))
+    for bit, (x, y, w, h) in zip(encode_bits(template_id, page_no), bit_rects()):
+        if bit:
+            shape.draw_rect(_rect(x, y, w, h))
+    shape.finish(color=None, fill=(0, 0, 0), width=0)
+
+
 def build_pdf(info):
     """Return the template PDF bytes for a stored template ``info``."""
+    if info.get("layout") == 2:
+        return _build_copy_pdf(info)
     font = pymupdf.Font("korea")
     doc = pymupdf.open()
-    dictionary = cv2.aruco.getPredefinedDictionary(MARKER_DICT)
     total = len(info["pages"])
     for page_no, chars in enumerate(info["pages"]):
         page = doc.new_page(width=PAGE_W * PT, height=PAGE_H * PT)
         page.insert_font(fontname="kr", fontbuffer=font.buffer)
         shape = page.new_shape()
-        # Corner markers, drawn module by module (6x6 including the black border).
-        for marker_id, (mx, my) in MARKERS.items():
-            modules = cv2.aruco.generateImageMarker(dictionary, marker_id, 6)
-            m = MARKER_SIZE / 6
-            for r in range(6):
-                for c in range(6):
-                    if modules[r, c] < 128:
-                        shape.draw_rect(_rect(mx + c * m, my + r * m, m, m))
-        for bit, (x, y, w, h) in zip(encode_bits(info["id"], page_no), bit_rects()):
-            if bit:
-                shape.draw_rect(_rect(x, y, w, h))
-        shape.finish(color=None, fill=(0, 0, 0), width=0)
+        _markers(shape, info["id"], page_no)
         # Writing boxes.
         for index in range(len(chars)):
             x, y = cell_box(index)
@@ -169,6 +212,78 @@ def build_pdf(info):
                 text(x + 1.5 + font.text_length(shown, fontsize=9) / PT + 1, y - 1.4, hint, 5.5)
             else:
                 text(x, y - 1.2, shown, 9, center_width=BOX)
+    doc.subset_fonts()
+    data = doc.tobytes(garbage=3, deflate=True)
+    doc.close()
+    return data
+
+
+def wrap_copy_text(paragraphs, width=COPY_WRAP, size=COPY_TEXT_PT):
+    """Break paragraphs into printed lines at most ``width`` mm long (at word boundaries)."""
+    font = pymupdf.Font("korea")
+    measure = lambda t: font.text_length(plain_text(t), fontsize=size) / PT  # noqa: E731
+    lines = []
+    for para in paragraphs:
+        current = ""
+        for word in para.split(" "):
+            trial = f"{current} {word}" if current else word
+            if current and measure(trial) > width:
+                lines.append(current)
+                current = word
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+    return lines
+
+
+def _build_copy_pdf(info):
+    font = pymupdf.Font("korea")
+    doc = pymupdf.open()
+    total = len(info["pages"])
+    evaluation = set(info.get("eval_pages", []))
+    for page_no, lines in enumerate(info["pages"]):
+        page = doc.new_page(width=PAGE_W * PT, height=PAGE_H * PT)
+        page.insert_font(fontname="kr", fontbuffer=font.buffer)
+        shape = page.new_shape()
+        _markers(shape, info["id"], page_no)
+        first_top = copy_row(0)[0]
+        last_bottom = copy_row(COPY_ROWS - 1)[2]
+        shape.draw_rect(_rect(COPY_X0, first_top, COPY_X1 - COPY_X0, last_bottom - first_top))
+        shape.finish(color=None, fill=GRID_PAPER, width=0)
+        for row in range(COPY_ROWS):
+            top, band, bottom = copy_row(row)
+            for k in range(COPY_ROW):  # horizontal grid lines of the band (and its bottom)
+                y = band + k * GRID_STEP
+                shape.draw_line(pymupdf.Point(COPY_X0 * PT, y * PT), pymupdf.Point(COPY_X1 * PT, y * PT))
+            x = GRID_STEP * int(COPY_X0 / GRID_STEP + 1)
+            while x < COPY_X1:
+                shape.draw_line(pymupdf.Point(x * PT, band * PT), pymupdf.Point(x * PT, bottom * PT))
+                x += GRID_STEP
+        shape.finish(color=GRID_LINE, width=0.5)
+        for row in range(COPY_ROWS):  # printed strips are plain paper
+            top, band, _ = copy_row(row)
+            shape.draw_rect(_rect(COPY_X0, top + 0.15, COPY_X1 - COPY_X0, GRID_STEP - 0.3))
+        shape.finish(color=None, fill=(1, 1, 1), width=0)
+        shape.commit()
+
+        def text(x, y, s, size, color=INK_GRAY):
+            page.insert_text(pymupdf.Point(x * PT, y * PT), s, fontsize=size, fontname="kr", color=color)
+
+        title = "평가용 필사 시트" if page_no in evaluation else "필사 시트"
+        text(30, 25.5, f"{title}   ID {info['id']}   {page_no + 1}/{total}쪽", 10, (0.15, 0.15, 0.15))
+        text(30, 30.5, "회색 글을 바로 아래 모눈 두 칸에 평소 노트 필기하듯 옮겨 쓰세요. 크기·속도·글씨체 모두 "
+                       "평소 그대로, 한 줄을 한 줄에 쓰면 됩니다.", 6.5)
+        text(30, 33.5, "틀린 글자는 지우지 말고 그냥 두세요(그 단어만 학습에서 빠집니다). 모서리의 검은 "
+                       "사각형은 가리지 마세요.", 6.5)
+        for row, line in enumerate(lines[:COPY_ROWS]):
+            top, band, _ = copy_row(row)
+            x, base = COPY_X0 + 2.0, band - 1.0
+            for ch, kind in parse_markup(line):
+                size = COPY_TEXT_PT * (0.62 if kind != "normal" else 1.0)
+                dy = -1.3 if kind == "sup" else 0.7 if kind == "sub" else 0.0
+                text(x, base + dy, ch, size, (0.35, 0.35, 0.35))
+                x += font.text_length(ch, fontsize=size) / PT
     doc.subset_fonts()
     data = doc.tobytes(garbage=3, deflate=True)
     doc.close()

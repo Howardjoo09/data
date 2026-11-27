@@ -94,7 +94,9 @@ class Line:
         self.atoms = []
 
 
-def _segment_lines(alpha):
+def _segment_lines(alpha, single=False):
+    """Text lines of an ink map; ``single`` when the image is known to hold one line (a band
+    of a copy sheet), so exponents and indices stay with their line."""
     binary = (alpha > 0.35).astype(np.uint8)
     n, labels, stats, cents = cv2.connectedComponentsWithStats(binary, connectivity=8)
     H, W = binary.shape
@@ -112,6 +114,8 @@ def _segment_lines(alpha):
                                       (c[4] > 0.5 * W and c[4] > 6 * typical))]
     if not comps:
         return [], labels
+    if single:
+        return [Line(labels, comps, alpha)], labels
     size = float(np.median([c[3] for c in comps if c[5] >= np.median([d[5] for d in comps])]))
     # Vertical density of ink-piece centres: one peak per text line, even when tall letters of
     # neighbouring lines touch (a plain row projection would merge those lines).
@@ -393,8 +397,8 @@ def ink_color(images):
     return np.clip(np.median(samples, axis=0), 0, 1).tolist() if samples else None
 
 
-def _prepare(image):
-    scale = min(1.0, WORK_WIDTH / image.shape[1])
+def _prepare(image, work_width=WORK_WIDTH):
+    scale = min(1.0, work_width / image.shape[1]) if work_width else 1.0
     if scale < 1.0:
         image = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
     alpha, dark = _ink(image)
@@ -434,18 +438,21 @@ def _parse(transcript):
     return chars, spaces, newlines, lines
 
 
-def extract_freeform(images, transcript):
+def extract_freeform(images, transcript, single_line=False, work_width=WORK_WIDTH, skip=()):
     """Learn glyphs from free-form handwriting ``images`` (RGB arrays) whose text is ``transcript``.
 
-    Returns ``(glyphs, report)``: glyph dicts in the same format as the template extractor
-    and a report with counts and, per transcript character, where it was found.
+    ``single_line``: every image is one line of the transcript (copy-sheet bands).
+    ``skip``: indices (into the transcript without whitespace) of characters to find but not
+    learn, such as exponents.  Returns ``(glyphs, report)``: glyph dicts in the same format as
+    the template extractor and a report with counts and, per transcript character, where it was
+    found.
     """
     chars, spaces, newlines, transcript_lines = _parse(transcript)
     pages, atoms = [], []
     line_no = 0
     for image in images:
-        image_r, alpha, inverse = _prepare(image)
-        lines, labels = _segment_lines(alpha)
+        image_r, alpha, inverse = _prepare(image, work_width)
+        lines, labels = _segment_lines(alpha, single_line)
         pages.append((image_r, alpha, labels, inverse))
         pen = _pen_width(labels, lines)
         for line in lines:
@@ -523,7 +530,8 @@ def extract_freeform(images, transcript):
                       "page": a0["page"], "line": a0["line"]})
     found = _consistent(_even_heights(found))
 
-    glyphs = _normalise(found, pages)
+    skip = set(skip)
+    glyphs = _normalise([g for g in found if g["n"] not in skip], pages)
     report = {"chars": len(chars), "learned": len(glyphs), "lines": line_no,
               "positions": {g["n"]: g["center"] for g in found if "center" in g},
               # Ink boxes in analysis coordinates (x0, top, x1, bottom), for measuring style.
@@ -706,7 +714,7 @@ def _normalise(found, pages):
                               interpolation=cv2.INTER_AREA if factor < 1 else cv2.INTER_LINEAR)
             mask = cv2.copyMakeBorder(mask, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
             glyphs.append({
-                "char": g["char"],
+                "char": g["char"], "n": g["n"],
                 "mask": (np.clip(mask, 0, 1) * 255).astype(np.uint8),
                 "left": 0.0,
                 "top": float(BASELINE + (g["top"] - baseline) * s - 2 / PX),

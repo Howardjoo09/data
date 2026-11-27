@@ -26,25 +26,31 @@ class ExtractError(ValueError):
 
 # --------------------------------------------------------------------------- input
 
-def load_images(data, filename=""):
-    """Decode an uploaded image or PDF into a list of RGB uint8 arrays."""
+def iter_images(data, filename="", dpi=250):
+    """Decode an uploaded image or PDF into RGB uint8 arrays, one page at a time."""
     if data[:5] == b"%PDF-" or filename.lower().endswith(".pdf"):
         try:
             doc = pymupdf.open(stream=data, filetype="pdf")
         except Exception as exc:
             raise ExtractError(f"PDF를 열 수 없습니다: {filename}") from exc
-        images = []
-        for page in doc:
-            pix = page.get_pixmap(dpi=250, alpha=False)
-            arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-            images.append(arr[:, :, :3].copy())
-        doc.close()
-        return images
+        try:
+            for page in doc:
+                pix = page.get_pixmap(dpi=dpi, alpha=False)
+                arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+                yield arr[:, :, :3].copy()
+        finally:
+            doc.close()
+        return
     try:
         image = ImageOps.exif_transpose(Image.open(io.BytesIO(data))).convert("RGB")
     except Exception as exc:
         raise ExtractError(f"이미지를 읽을 수 없습니다 (JPG·PNG·PDF만 지원): {filename}") from exc
-    return [np.asarray(image)]
+    yield np.asarray(image)
+
+
+def load_images(data, filename=""):
+    """Decode an uploaded image or PDF into a list of RGB uint8 arrays."""
+    return list(iter_images(data, filename))
 
 
 # --------------------------------------------------------------------------- page geometry
@@ -72,8 +78,9 @@ def _detect_markers(gray):
     return best
 
 
-def rectify(image):
-    """Warp a photo/scan of a template page onto the canonical A4 grid (PX px per mm)."""
+def rectify(image, with_homography=False):
+    """Warp a photo/scan of a template page onto the canonical A4 grid (PX px per mm); with
+    ``with_homography`` also return the image-to-page matrix (for sharper crops)."""
     gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
     found = _detect_markers(gray)
     if len(found) < 3:
@@ -85,8 +92,9 @@ def rectify(image):
     if H is None:
         raise ExtractError("페이지 기울기를 계산하지 못했습니다. 다시 촬영해 주세요.")
     size = (int(T.PAGE_W * PX), int(T.PAGE_H * PX))
-    return cv2.warpPerspective(image, H, size, flags=cv2.INTER_LINEAR,
+    page = cv2.warpPerspective(image, H, size, flags=cv2.INTER_LINEAR,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=(255, 255, 255))
+    return (page, H) if with_homography else page
 
 
 def read_page_id(page):
@@ -185,37 +193,50 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
     order).  Returns ``(profile, empty_template_boxes, warnings)``; ``profile["report"]``
     describes the free-form part.
     """
-    from . import freeform  # imported here: freeform builds on this module
+    from . import copysheet, freeform  # imported here: they build on this module
 
-    pages, warnings, loose = [], [], []
+    pages, warnings, loose, copies, evaluation = [], [], [], [], []
     for data, name in uploads:
-        for n, image in enumerate(load_images(data, name)):
+        # Copy sheets are written at note size: render PDFs sharply enough for small letters.
+        for n, image in enumerate(iter_images(data, name, dpi=400)):
             label = f"{name} {n + 1}쪽" if len(uploads) > 1 or n else name
             try:
-                page = rectify(image)
+                page, H = rectify(image, with_homography=True)
             except ExtractError as exc:
                 if transcript.strip():
-                    loose.append(image)
+                    scale = min(1.0, 3000 / image.shape[1])
+                    loose.append(cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                                 if scale < 1 else image)
                 else:
                     warnings.append(f"{label}: 템플릿 표식이 없습니다. 자유롭게 쓴 손글씨라면 "
                                     "사진에 적힌 내용을 함께 입력해 주세요.")
                 continue
             page_id = read_page_id(page)
             if page_id is None and template_hint:
-                page_id = (int(template_hint), len(pages))
+                page_id = (int(template_hint), len(pages) + len(copies) + len(evaluation))
                 warnings.append(f"{label}: 페이지 코드를 읽지 못해 입력한 템플릿 ID와 업로드 순서를 사용했습니다.")
             if page_id is None:
                 warnings.append(f"{label}: 상단의 페이지 코드를 읽지 못했습니다. 템플릿 ID를 직접 입력해 보세요.")
                 continue
-            pages.append((label, page, page_id))
-    resolved = []
-    for label, page, (template_id, page_no) in pages:
-        info = T.load_template(data_dir, template_id)
-        if info is None or page_no >= len(info["pages"]):
-            warnings.append(f"{label}: 템플릿 {template_id} {page_no + 1}쪽 정보를 찾지 못했습니다 "
-                            "(이 서버에서 만든 템플릿만 인식할 수 있습니다).")
-            continue
-        resolved.append((page, info["pages"][page_no]))
+            template_id, page_no = page_id
+            info = T.load_template(data_dir, template_id)
+            if info is None or page_no >= len(info["pages"]):
+                warnings.append(f"{label}: 템플릿 {template_id} {page_no + 1}쪽 정보를 찾지 못했습니다 "
+                                "(이 서버에서 만든 템플릿만 인식할 수 있습니다).")
+                continue
+            if info.get("layout") == 2:  # copy sheet: keep only the sharp band crops
+                lines = info["pages"][page_no]
+                target = evaluation if page_no in info.get("eval_pages", []) else copies
+                target.append((copysheet.bands(image, H, len(lines)), lines))
+            else:
+                pages.append((page, info["pages"][page_no]))
+    resolved = pages
+    copy_glyphs, copy_report = [], None
+    if copies:
+        copy_glyphs, copy_report, _, _ = copysheet.read_pages(copies)
+        if copy_report["chars"] and copy_report["learned"] < 0.4 * copy_report["chars"]:
+            warnings.append(f"필사 시트: {copy_report['chars']}자 중 {copy_report['learned']}자만 확실하게 "
+                            "찾았습니다. 줄을 건너뛰거나 다른 줄에 쓰지 않았는지 확인해 주세요.")
     report = None
     loose_glyphs = []
     if loose:
@@ -225,7 +246,7 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
         if report["learned"] < 0.5 * report["chars"]:
             warnings.append(f"자유 양식: 입력한 내용 {report['chars']}자 중 {report['learned']}자만 확실하게 "
                             "찾았습니다. 사진 속 글과 입력한 내용이 같은지(빠진 줄, 오타) 확인해 주세요.")
-    if not resolved and not loose_glyphs:
+    if not resolved and not loose_glyphs and not copy_glyphs and not evaluation:
         raise ExtractError("글씨를 학습할 수 있는 페이지가 없습니다.\n" + "\n".join(warnings))
 
     if profile_id:
@@ -252,12 +273,19 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
             cv2.imwrite(os.path.join(directory, name), g.pop("mask"))
             g["file"] = name
             profile["glyphs"].append(g)
-    for g in loose_glyphs:
-        name = f"g{len(profile['glyphs']):04d}.png"
-        cv2.imwrite(os.path.join(directory, name), g.pop("mask"))
-        g["file"] = name
-        g["source"] = "freeform"
-        profile["glyphs"].append(g)
+    for source, items in (("freeform", loose_glyphs), ("copy", copy_glyphs)):
+        for g in items:
+            name = f"g{len(profile['glyphs']):04d}.png"
+            cv2.imwrite(os.path.join(directory, name), g.pop("mask"))
+            g["file"] = name
+            g["source"] = source
+            g.pop("n", None)
+            profile["glyphs"].append(g)
+    if copy_report:
+        profile["copy_report"] = {k: copy_report[k] for k in ("chars", "learned", "lines")}
+    if evaluation:
+        kept = copysheet.save_evaluation(directory, evaluation)
+        warnings.append(f"평가용 필사 시트 {kept}줄은 학습하지 않고 비교용으로 보관했습니다.")
     if report and report.get("ink"):
         inks.append(report["ink"])
     if inks:
