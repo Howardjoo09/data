@@ -93,16 +93,17 @@
     조합합니다. 조합한 글자는 직접 쓴 글자보다 덜 자연스럽고, 같은 글자를 여러 번 써 두면 쓸 때마다 조금씩 다른
     모양이 나옵니다. 그래서 많이 쓸수록 내 글씨와 더 닮습니다.
     <ol>
-      <li><b style="display:inline">간단 1쪽</b> — 가장 빨리 시작 (조합한 글자가 많음)</li>
-      <li><b style="display:inline">간단 2~3쪽</b> — 추천: 문서 글자의 대부분을 직접 쓴 글씨로</li>
-      <li><b style="display:inline">자세히</b> — 문서에 나오는 모든 글자를 직접 쓴 글씨로</li>
-      <li><b style="display:inline">+ <a href="/api/template/100003.pdf" target="_blank">필사 시트</a></b> — 문장 속에서 쓴 글씨라 실제 노트와 가장 닮습니다 (다 쓰고 ②에서 올리면 됩니다)</li>
+      <li><b style="display:inline">간단 1쪽</b> (약 10분) — 가장 빨리 시작 (조합한 글자가 많음)</li>
+      <li><b style="display:inline">간단 2~3쪽</b> (약 20~30분) — 추천: 문서 글자의 대부분을 직접 쓴 글씨로</li>
+      <li><b style="display:inline">자세히</b> (미적분 노트 기준 7~8쪽, 1시간 남짓) — 문서에 나오는 모든 글자를 직접 쓴 글씨로</li>
+      <li><b style="display:inline">+ <a href="/api/template/100003.pdf" target="_blank">필사 시트</a></b> (14쪽, 한 쪽 약 10분 — 몇 쪽만 써도 됩니다) — 문장 속에서 쓴 글씨라 실제 노트와 가장 닮습니다 (다 쓰고 ②에서 올리면 됩니다)</li>
     </ol>
+    <span class="muted">시간은 템플릿 한 칸에 5~6초, 필사는 평소 필기 속도로 잡은 대략적인 값입니다.</span><br>
     나중에 언제든 ②의 <b style="display:inline">현재 글씨체에 글자 추가</b>로 더 써서 넣을 수 있습니다.
   </div>
   <div class="row" id="simpleBox">
     <label>분량 <select id="simplePages">
-      <option value="1">1쪽 (110칸)</option><option value="2" selected>2쪽 (220칸)</option><option value="3">3쪽 (330칸)</option>
+      <option value="1">1쪽 (110칸, 약 10분)</option><option value="2" selected>2쪽 (220칸, 약 20분)</option><option value="3">3쪽 (330칸, 약 30분)</option>
     </select></label>
     <div class="muted" id="simpleHint" style="flex-basis:100%">아래에서 변환할 PDF를 고르면 그 PDF에 맞춰 글자를 고르고, 분량마다 직접 쓴 글씨로 쓰는 비율을 보여 줍니다. 고르지 않으면 일상적인 한글에 맞춥니다.</div>
   </div>
@@ -230,6 +231,13 @@ let docPreview = null;  // what a short template of 1-3 pages would give
 
 const mode = () => document.querySelector("input[name=tplMode]:checked").value;
 const pct = (x) => `${Math.round(100 * x)}%`;
+// Rough time to fill a template: 5-6 seconds a box (writing it and moving to the next).
+function fillTime(cells) {
+  const minutes = Math.max(1, Math.round(cells * 5.5 / 60 / 5) * 5);
+  if (minutes < 60) return `약 ${minutes}분`;
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return `약 ${h}시간${m ? ` ${m}분` : ""}`;
+}
 function showMode() {
   const simple = mode() === "simple";
   $("simpleBox").style.display = simple ? "" : "none";
@@ -242,7 +250,7 @@ function showMode() {
   if (docPreview) {
     for (const o of $("simplePages").options) {
       const p = docPreview[o.value];
-      o.textContent = `${o.value}쪽 (${o.value * 110}칸) — 직접 쓴 글씨 ${pct(p.direct)}, 자모 조합 ${pct(p.composed)}` +
+      o.textContent = `${o.value}쪽 (${o.value * 110}칸, ${fillTime(o.value * 110)}) — 직접 쓴 글씨 ${pct(p.direct)}, 자모 조합 ${pct(p.composed)}` +
         (p.font >= 0.005 ? `, 기본 글꼴 ${pct(p.font)}` : "");
     }
   }
@@ -296,7 +304,7 @@ $("tplBtn").onclick = async () => {
       `${pct(r.coverage.composed)}는 내 글씨 자모의 조합` +
       (r.coverage.font >= 0.005 ? `, ${pct(r.coverage.font)}는 기본 글꼴(템플릿에 없는 기호)` : "") + "로 씁니다." : "";
     $("tplMsg").className = "msg";
-    $("tplMsg").innerHTML = `템플릿 ID <b>${r.id}</b> · ${r.cells}칸 · ${r.pages}쪽 → ` +
+    $("tplMsg").innerHTML = `템플릿 ID <b>${r.id}</b> · ${r.cells}칸 · ${r.pages}쪽 · 채우는 데 ${fillTime(r.cells)} → ` +
       `<a href="${r.pdf}" target="_blank">PDF 열기/인쇄</a><br>` +
       `<span class="muted">A4에 '실제 크기(100%)'로 인쇄하세요. 다 쓰면 ②에서 사진이나 스캔을 올리면 됩니다.</span>` + cov;
   } catch (e) { show($("tplMsg"), e.message, true); }
