@@ -27,11 +27,14 @@ JOB_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 def _install_samples():
-    """Make the bundled demo templates known so the demo photos can be uploaded."""
+    """Make the official templates and the demo templates known, so filled-in copies of them
+    are recognised even on a fresh server."""
     os.makedirs(os.path.join(DATA, "templates"), exist_ok=True)
-    for path in glob.glob(os.path.join(BASE, "samples", "template_*.json")):
+    sources = glob.glob(os.path.join(BASE, "templates", "*.json"))
+    sources += glob.glob(os.path.join(BASE, "samples", "template_*.json"))
+    for path in sources:
         target = os.path.join(DATA, "templates", os.path.basename(path).replace("template_", ""))
-        if not os.path.exists(target):
+        if not os.path.exists(target) or os.path.getmtime(target) < os.path.getmtime(path):
             shutil.copyfile(path, target)
 
 

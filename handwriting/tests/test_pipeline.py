@@ -2,6 +2,7 @@
 
 Run from the handwriting folder:  python -m unittest discover -s tests -v
 """
+import glob
 import io
 import json
 import os
@@ -42,6 +43,19 @@ class TemplateTests(unittest.TestCase):
     def test_charlist_dedupes_and_adds_text_characters(self):
         chars = charsets.build_charlist(["digits"], "1 가가 “AB”\n", repeat=2)
         self.assertEqual("".join(chars), "00112233445566778899가가\"\"AABB")
+
+    def test_official_templates_print_and_read_back(self):
+        # Kept in the repository with fixed IDs, so a filled-in copy is recognised on any server.
+        for path in sorted(glob.glob(os.path.join(ROOT, "templates", "*.json"))):
+            with open(path, encoding="utf-8") as f:
+                info = json.load(f)
+            self.assertEqual(os.path.basename(path), f"{info['id']}.json")
+            chars = [c for page in info["pages"] for c in page]
+            self.assertEqual(len(chars), len(set(chars)))
+            pdf = T.build_pdf(info)
+            for n in range(len(info["pages"])):
+                page = extract.rectify(T.render_page_image(pdf, n, 6))
+                self.assertEqual(extract.read_page_id(page), (info["id"], n))
 
     def test_cells_stay_inside_page_and_markers(self):
         x, y = T.cell_box(T.CELLS_PER_PAGE - 1)
