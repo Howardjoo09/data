@@ -102,11 +102,26 @@ def unique_chars(text):
     return "".join(dict.fromkeys(c for c in normalize_text(text) if not c.isspace() and c.isprintable()))
 
 
-def build_charlist(set_keys, custom_text="", repeat=1):
+def is_hanja(ch):
+    """Chinese characters (CJK ideographs, including the compatibility and extension blocks)."""
+    o = ord(ch)
+    return (0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or 0xF900 <= o <= 0xFAFF
+            or 0x20000 <= o <= 0x3134F)
+
+
+def build_charlist(set_keys, custom_text="", repeat=1, exclude_hanja=False, extra="", skip=""):
+    """Characters of a template: the chosen sets and every character of ``custom_text``, each
+    ``repeat`` times, then ``extra`` (more copies of characters already in the list, e.g. the
+    frequent ones of a document).  ``skip``: characters to leave out (already written)."""
     chars = []
     for key in set_keys:
         if key in CHARSETS:
             chars.extend(CHARSETS[key][1])
     chars.extend(unique_chars(custom_text))
-    chars = list(dict.fromkeys(chars))
-    return [c for c in chars for _ in range(max(1, min(3, int(repeat))))]
+    skip = set(skip)
+    chars = [c for c in dict.fromkeys(chars)
+             if c not in skip and not (exclude_hanja and is_hanja(c))]
+    out = [c for c in chars for _ in range(max(1, min(3, int(repeat))))]
+    present = set(chars)
+    out.extend(c for c in normalize_text(extra) if c in present)
+    return out

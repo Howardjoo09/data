@@ -18,7 +18,7 @@ import zipfile
 import pymupdf
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from hwnote import charsets, extract, pageworker, render, style, template as T, textio
+from hwnote import charsets, extract, pageworker, pdfnotes, render, style, template as T, textio
 
 # Inside the packaged app the program files are unpacked to a temporary folder.
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -108,10 +108,67 @@ def list_charsets():
     return jsonify([{"key": k, "label": label, "count": len(chars)} for k, (label, chars) in charsets.CHARSETS.items()])
 
 
+def _known_characters(profile_id=""):
+    """Characters a handwriting (the given profile, else my handwriting) already has."""
+    path = None
+    if profile_id and PROFILE_RE.match(profile_id):
+        path = extract.profile_dir(DATA, profile_id)
+    else:
+        _, path = _my_profile()
+    if not path or not os.path.exists(os.path.join(path, "profile.json")):
+        return ""
+    with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
+        return "".join({g["char"] for g in json.load(f)["glyphs"]})
+
+
+@app.post("/api/template/scan")
+def scan_document_for_template():
+    """The characters of a PDF (or text file), most frequent first, for a template that has
+    exactly what that document needs.  ``extra`` repeats the frequent ones (2 more copies at
+    60+ uses, 1 more at 20+), so they get written in several versions."""
+    upload = request.files.get("document")
+    if not upload or not upload.filename:
+        return _error("PDF 또는 TXT 파일을 골라 주세요.")
+    data = upload.read()
+    if data[:5] == b"%PDF-" or upload.filename.lower().endswith(".pdf"):
+        try:
+            counts, pages = pdfnotes.document_characters(data)
+        except Exception:
+            return _error("PDF를 열 수 없습니다.")
+    else:
+        try:
+            text = textio.extract_text(data, upload.filename)
+        except textio.TextError as exc:
+            return _error(str(exc))
+        from collections import Counter
+        counts = Counter(c for c in charsets.normalize_text(text) if not c.isspace() and c.isprintable())
+        pages = None
+    hanja = [c for c in counts if charsets.is_hanja(c)]
+    if request.form.get("exclude_hanja") == "1":
+        for c in hanja:
+            del counts[c]
+    known = set()
+    if request.form.get("skip_known") == "1":
+        known = set(_known_characters(request.form.get("profile_id", ""))) & set(counts)
+        for c in known:
+            del counts[c]
+    ordered = [c for c, _ in counts.most_common()]
+    # Further copies go round the list (x n ) ( ... then x n ...), never two of a kind in a row:
+    # a character written twice in succession comes out the same twice.
+    extra = "".join(c for c, n in counts.most_common() if n >= 20) + \
+        "".join(c for c, n in counts.most_common() if n >= 60)
+    return jsonify({"chars": "".join(ordered), "extra": extra, "unique": len(ordered), "pages": pages,
+                    "hanja": len(hanja), "hanja_removed": request.form.get("exclude_hanja") == "1",
+                    "known": len(known), "uses": sum(counts.values())})
+
+
 @app.post("/api/template")
 def make_template():
     body = request.get_json(force=True, silent=True) or {}
-    chars = charsets.build_charlist(body.get("sets", []), body.get("text", "")[:MAX_TEXT], body.get("repeat", 1))
+    skip = _known_characters(str(body.get("profile_id", ""))) if body.get("skip_known") else ""
+    chars = charsets.build_charlist(body.get("sets", []), body.get("text", "")[:MAX_TEXT], body.get("repeat", 1),
+                                    exclude_hanja=bool(body.get("exclude_hanja")),
+                                    extra=str(body.get("extra", ""))[:MAX_TEXT], skip=skip)
     if not chars:
         return _error("템플릿에 넣을 글자를 하나 이상 고르세요.")
     if len(chars) > T.CELLS_PER_PAGE * 20:

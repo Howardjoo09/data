@@ -261,6 +261,26 @@ class PipelineTests(unittest.TestCase):
                         content_type="multipart/form-data")
         self.assertEqual(r.status_code, 400)
 
+    def test_template_from_a_pdf_without_hanja(self):
+        import server
+        server.DATA = self.data
+        client = server.app.test_client()
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
+        page.insert_text((72, 100), "微積分 수열 수열 수열 x+y", fontname="kr", fontsize=12)
+        pdf = doc.tobytes()
+        doc.close()
+        r = client.post("/api/template/scan", data={"document": (io.BytesIO(pdf), "d.pdf"), "exclude_hanja": "1"},
+                        content_type="multipart/form-data").json
+        self.assertEqual((r["pages"], r["hanja"]), (1, 3))
+        self.assertEqual(r["chars"][:2], "수열")  # most frequent first
+        self.assertEqual(set(r["chars"]), set("수열x+y"))
+        r = client.post("/api/template", json={"sets": [], "text": "微積分 가나 가", "exclude_hanja": True,
+                                               "extra": "가가힣"}).json
+        info = T.load_template(self.data, r["id"])
+        self.assertEqual("".join(info["pages"][0]), "가나가가")  # extra copies only of listed characters
+
     def test_page_ranges(self):
         import server
         self.assertEqual(server.parse_pages("", 3), [0, 1, 2])

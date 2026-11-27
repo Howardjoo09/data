@@ -72,6 +72,26 @@ def read_page(page):
     return chars, lines, pictures
 
 
+def document_characters(pdf_bytes):
+    """How often each character is written in a PDF (formula fonts decoded, bracket pieces
+    counted as the bracket they build; fraction bars and similar strokes are drawn, not
+    written, so they are left out).  Returns ``(Counter, page_count)``."""
+    from collections import Counter
+    doc = pymupdf.open(stream=pdf_bytes, filetype="pdf")
+    counts = Counter()
+    for page in doc:
+        chars, _, _ = read_page(page)
+        for c in chars:
+            ch = PIECE_TO_DELIM.get(c.ch, c.ch)
+            for one in ch:
+                if one.isspace() or not one.isprintable() or one in (mathfont.FRACTION, mathfont.OVERDOT):
+                    continue
+                counts[one] += 1
+    pages = doc.page_count
+    doc.close()
+    return counts, pages
+
+
 def _group_pieces(chars):
     """Join stacked bracket pieces (⎧ ⎪ ⎨ ⎪ ⎩) into single tall delimiters."""
     pieces = [c for c in chars if c.ch in PIECE_TO_DELIM]

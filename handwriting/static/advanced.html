@@ -29,8 +29,19 @@
   <h2>① 글씨체 템플릿 만들기</h2>
   <div id="sets" class="row"></div>
   <div class="row">
-    <div>변환할 글을 미리 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다 (가장 자연스러운 결과):</div>
-    <textarea id="tplText" placeholder="(선택) 변환할 글을 붙여 넣으세요"></textarea>
+    <div><b>변환할 PDF를 올리면</b> 그 안에 나오는 글자를 모두 찾아(수식 기호 포함) 아래 칸에 넣습니다.
+      많이 나오는 글자부터 적힙니다.</div>
+    <input type="file" id="tplDoc" accept=".pdf,.txt,.md,application/pdf,text/plain">
+    <span id="tplDocMsg" class="muted"></span>
+  </div>
+  <div class="row">
+    <div>또는 변환할 글을 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다:</div>
+    <textarea id="tplText" placeholder="(선택) 변환할 글을 붙여 넣거나, 위에서 PDF를 고르세요"></textarea>
+  </div>
+  <div class="row">
+    <label><input type="checkbox" id="noHanja" checked> 한자 빼기</label>
+    <label><input type="checkbox" id="frequent" checked> 자주 나오는 글자는 2~3번 쓰기 (PDF에서 가져올 때)</label>
+    <label><input type="checkbox" id="skipKnown"> 이미 내 글씨체에 있는 글자 빼기</label>
   </div>
   <div class="row">
     <label>글자마다 <select id="repeat"><option value="1">1번</option><option value="2">2번 (더 자연스러움)</option></select> 쓰기</label>
@@ -127,13 +138,43 @@ call("/api/charsets").then((sets) => {
   ).join("");
 });
 
+let docExtra = "";  // more copies of the frequent characters of the chosen PDF
+
+async function scanDocument() {
+  const file = $("tplDoc").files[0];
+  if (!file) return;
+  const form = new FormData();
+  form.append("document", file);
+  form.append("exclude_hanja", $("noHanja").checked ? "1" : "0");
+  form.append("skip_known", $("skipKnown").checked ? "1" : "0");
+  form.append("profile_id", $("profileId").value.trim());
+  $("tplDocMsg").textContent = "글자를 찾는 중…";
+  try {
+    const r = await call("/api/template/scan", { method: "POST", body: form });
+    $("tplText").value = r.chars;
+    docExtra = r.extra;
+    const notes = [];
+    if (r.hanja) notes.push(r.hanja_removed ? `한자 ${r.hanja}자 뺌` : `한자 ${r.hanja}자 포함`);
+    if (r.known) notes.push(`이미 있는 글자 ${r.known}자 뺌`);
+    $("tplDocMsg").textContent = `${r.pages ? r.pages + "쪽에서 " : ""}글자 ${r.unique}종을 찾았습니다` +
+      (notes.length ? ` (${notes.join(", ")})` : "") +
+      `. 위의 글자 묶음 체크를 모두 풀면 이 PDF에 나오는 글자만 넣습니다.`;
+  } catch (e) { $("tplDocMsg").textContent = e.message; }
+}
+$("tplDoc").onchange = scanDocument;
+$("noHanja").onchange = () => { if ($("tplDoc").files[0]) scanDocument(); };
+$("skipKnown").onchange = () => { if ($("tplDoc").files[0]) scanDocument(); };
+
 $("tplBtn").onclick = async () => {
   const sets = [...document.querySelectorAll("#sets input:checked")].map((i) => i.value);
   show($("tplMsg"), "만드는 중…");
   try {
     const r = await call("/api/template", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sets, text: $("tplText").value, repeat: $("repeat").value }),
+      body: JSON.stringify({ sets, text: $("tplText").value, repeat: $("repeat").value,
+                             exclude_hanja: $("noHanja").checked, skip_known: $("skipKnown").checked,
+                             profile_id: $("profileId").value.trim(),
+                             extra: $("frequent").checked && $("tplDoc").files[0] ? docExtra : "" }),
     });
     $("tplMsg").className = "msg";
     $("tplMsg").innerHTML = `템플릿 ID <b>${r.id}</b> · ${r.cells}칸 · ${r.pages}쪽 → ` +
