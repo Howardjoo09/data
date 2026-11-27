@@ -12,7 +12,7 @@ import time
 import cv2
 import pymupdf
 
-from .charsets import LABEL_HINTS
+from .charsets import LABEL_DISPLAY, LABEL_HINTS
 
 PAGE_W, PAGE_H = 210.0, 297.0
 MARKER_SIZE = 12.0
@@ -156,18 +156,19 @@ def build_pdf(info):
             page.insert_text(pymupdf.Point(x * PT, y * PT), s, fontsize=size, fontname="kr", color=color)
 
         text(30, 25.5, f"손글씨 템플릿   ID {info['id']}   {page_no + 1}/{total}쪽", 10, (0.15, 0.15, 0.15))
-        text(30, 30.5, "검정·파랑 펜으로 칸마다 위 글자를 한 번씩 쓰세요. 한글은 칸 가운데에 평소 크기로, "
-                       "영어·숫자는 점선을 바닥선으로 삼아 쓰세요.", 6.5)
-        text(30, 33.5, "칸 밖으로 나가지 않게, 모서리의 검은 사각형이 모두 보이도록 반듯하게 스캔·촬영하세요. "
-                       "빈칸은 건너뛰어도 됩니다.", 6.5)
+        text(30, 30.5, "칸마다 위 글자를 평소 필기하듯 쓰세요. 한글은 칸 가운데에 평소 크기로, 영어·숫자는 점선을 "
+                       "바닥선으로 삼아 쓰고, 기호는 편하게 쓰면 됩니다.", 6.5)
+        text(30, 33.5, "같은 글자가 다시 나오면 매번 새로 쓰세요(복사·붙여넣기 금지). 칸 밖으로 나가지 않게, 모서리의 "
+                       "검은 사각형은 가리지 마세요.", 6.5)
         for index, ch in enumerate(chars):
             x, y = cell_box(index)
             hint = LABEL_HINTS.get(ch)
+            shown = LABEL_DISPLAY.get(ch, ch)
             if hint:
-                text(x + 1, y - 1.2, ch, 9)
-                text(x + 4.5, y - 1.4, hint, 5.5)
+                text(x + 1, y - 1.2, shown, 9)
+                text(x + 1.5 + font.text_length(shown, fontsize=9) / PT + 1, y - 1.4, hint, 5.5)
             else:
-                text(x, y - 1.2, ch, 9, center_width=BOX)
+                text(x, y - 1.2, shown, 9, center_width=BOX)
     doc.subset_fonts()
     data = doc.tobytes(garbage=3, deflate=True)
     doc.close()

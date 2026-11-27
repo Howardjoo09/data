@@ -51,7 +51,8 @@ class TemplateTests(unittest.TestCase):
                 info = json.load(f)
             self.assertEqual(os.path.basename(path), f"{info['id']}.json")
             chars = [c for page in info["pages"] for c in page]
-            self.assertEqual(len(chars), len(set(chars)))
+            if not info.get("variants"):
+                self.assertEqual(len(chars), len(set(chars)))
             pdf = T.build_pdf(info)
             for n in range(len(info["pages"])):
                 page = extract.rectify(T.render_page_image(pdf, n, 6))

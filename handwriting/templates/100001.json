@@ -3,6 +3,7 @@
  "layout": 1,
  "name": "시험용 1쪽 템플릿",
  "official": true,
+ "variants": false,
  "pages": [
   [
    "가",
