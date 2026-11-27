@@ -136,6 +136,25 @@ class PipelineTests(unittest.TestCase):
         pdf = render.pages_to_pdf(pages)
         self.assertEqual(pymupdf.open(stream=pdf, filetype="pdf").page_count, 2)
 
+    def test_pdf_page_rewritten_in_place(self):
+        from hwnote import pdfnotes
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_font(fontname="kr", fontbuffer=pymupdf.Font("korea").buffer)
+        page.insert_text((72, 100), "광합성 정리 (CO2 + H2O)", fontname="kr", fontsize=12)
+        page.draw_rect(pymupdf.Rect(60, 80, 400, 110), color=(0, 0, 0), width=0.5)
+        page.insert_text((72, 300), "아래 문장", fontname="kr", fontsize=12)
+        profile = render.Profile(extract.profile_dir(self.data, self.profile["id"]))
+        out = pdfnotes.convert_pdf(doc.tobytes(), profile, render.Options(paper="blank", seed=1))
+        self.assertEqual(len(out), 1)
+        ink = 255 - np.asarray(out[0].convert("L"), np.float32)
+        k = out[0].width / page.rect.width
+        line_band = ink[int(88 * k):int(102 * k), int(72 * k):int(330 * k)]
+        self.assertGreater((line_band > 100).mean(), 0.02)                     # text written there
+        self.assertGreater((ink[int(80 * k) - 3:int(80 * k) + 4, int(100 * k):int(380 * k)] > 100).mean(), 0.2)  # box
+        self.assertGreater((ink[int(288 * k):int(302 * k)] > 100).sum(), 50)     # second line kept its place
+        self.assertLess((ink[int(150 * k):int(250 * k)] > 100).mean(), 0.001)  # nothing in between
+
     def test_web_api(self):
         os.environ["HWNOTE_DATA"] = self.data
         import server

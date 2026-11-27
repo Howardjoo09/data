@@ -12,7 +12,7 @@ import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
 from . import charsets
-from .compose import Composer, JamoSource, match_stroke, stroke_width, tight, vowel_class
+from .compose import Composer, JamoSource, match_stroke, rebuild, stroke_width, tight, vowel_class
 
 PX = 10  # profile resolution, px per mm
 BASELINE_LETTERS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZacemnorsuvwxz0123456789")
@@ -26,6 +26,7 @@ class Glyph:
     top: float        # mm from the top of the template box
     w: float          # mm
     h: float          # mm
+    variant: bool = False  # a one-off copy (not cached)
 
 
 @dataclass
@@ -114,6 +115,20 @@ class Profile:
         return set(self.glyphs)
 
 
+def compose_size(mask):
+    """Size of the tight ink box of a glyph image (parts' unit boxes refer to it)."""
+    return tight(mask)[0].shape
+
+
+def _with_margin(original, inner):
+    """Put a rebuilt tight-box image back into the original glyph's frame (same margins)."""
+    _, r0, c0 = tight(original)
+    out = np.zeros_like(original)
+    h, w = inner.shape
+    out[r0:r0 + h, c0:c0 + w] = inner[:out.shape[0] - r0, :out.shape[1] - c0]
+    return out
+
+
 class GlyphFactory:
     """Supplies a glyph for any character: handwritten, composed from jamo, or font fallback."""
 
@@ -124,12 +139,19 @@ class GlyphFactory:
         self.composed, self.fallback = set(), set()
         standalone = lambda j: self._pick(j).mask if j in profile.glyphs else None  # noqa: E731
         self.jamo = JamoSource(standalone)
-        self.composer = Composer(standalone, rng)
+        natural = {c: (gs[0].w, gs[0].h) for c, gs in profile.glyphs.items() if charsets.is_jamo(c)}
+        self.composer = Composer(standalone, rng, natural)
         self.harvested = 0
         by_shape = {}
+        self.parts = {}  # id(glyph) -> its jamo, for rebuilding varied copies
+        self.vary = True
         for c, variants in profile.glyphs.items():
             if charsets.is_syllable(c):
-                self.harvested += sum(self.composer.learn(c, g.mask) for g in variants)
+                for g in variants:
+                    parts = self.composer.learn(c, g.mask)
+                    if parts:
+                        self.parts[id(g)] = parts
+                        self.harvested += 1
                 by_shape.setdefault(self.shape(c), []).extend(variants)
         # How big this writer makes each shape of syllable: 고 is flatter than 를, 이 narrower
         # than 했.  Unwritten syllables are built at the size of their written relatives.
@@ -142,6 +164,8 @@ class GlyphFactory:
         self._skeletons = {}
 
     def skeleton(self, glyph):
+        if glyph.variant:
+            return skeleton(glyph.mask)
         key = id(glyph)
         if key not in self._skeletons:
             self._skeletons[key] = (glyph, skeleton(glyph.mask))  # keep glyph alive: ids stay unique
@@ -173,7 +197,12 @@ class GlyphFactory:
         """Return ``(glyph, category)``; category ``'hangul'`` or ``'latin'`` decides size/baseline."""
         category = "hangul" if (charsets.is_syllable(ch) or charsets.is_jamo(ch)) else "latin"
         if ch in self.p.glyphs:
-            return self._pick(ch), category
+            g = self._pick(ch)
+            parts = self.parts.get(id(g))
+            if parts and self.vary:
+                mask = rebuild(ch, parts, compose_size(g.mask), self.composer, self.rng)
+                return Glyph(_with_margin(g.mask, mask), g.top, g.w, g.h, variant=True), category
+            return g, category
         if charsets.is_syllable(ch):
             p = self.p
             w_mm, h_mm, bottom = self._shape_size(ch) or (p.hangul_w, p.hangul_h, p.hangul_bottom)
@@ -185,8 +214,10 @@ class GlyphFactory:
                 pad = (mask.shape[0] - h_px) // 2
                 cropped, r0, _ = tight(mask)
                 r0 -= pad
-                # Jamo rarely fill their boxes; grow the syllable towards the typical written size.
-                grow = min(1.25, max(1.0, 0.95 * h_px / cropped.shape[0]))
+                # Jamo rarely fill their boxes; grow the syllable to the writer's typical height
+                # for this shape, without letting it get wider than such syllables are.
+                grow = min(1.7, max(1.0, 0.92 * h_px / cropped.shape[0]),
+                           max(1.0, 1.2 * w_px / cropped.shape[1]))
                 if grow > 1.0:
                     cropped = cv2.resize(cropped, None, fx=grow, fy=grow, interpolation=cv2.INTER_LINEAR)
                     r0 = h_px - (h_px - r0) * grow

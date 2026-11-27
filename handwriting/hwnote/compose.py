@@ -355,22 +355,42 @@ class Composer:
     shaped syllable, and finally compound jamo assembled from simple ones.
     """
 
-    def __init__(self, standalone, rng):
+    def __init__(self, standalone, rng, natural=None):
         self.standalone = standalone  # jamo -> mask or None (template boxes)
         self.rng = rng
         self.bank = {}
+        self._units = {}       # (role, vclass, has_final) -> unit boxes seen in written syllables
+        # Relative size of each consonant as the writer draws it on its own (ㅇ is small).
+        natural = natural or {}
+        heights = [h for j, (w, h) in natural.items() if j in "ㄱㄴㄷㄹㅁㅂㅅㅈㅊㅋㅌㅍㅎ"]
+        ref = float(np.median(heights)) if heights else 0.0
+        self.rel = {j: float(np.clip((h / ref) ** 0.8, 0.65, 1.1)) for j, (w, h) in natural.items()
+                    if ref and j in "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"}
 
     def learn(self, ch, mask):
+        """Cut ``ch`` into jamo and remember them; returns the parts (or None)."""
         parts = harvest(ch, mask)
         if not parts:
-            return False
+            return None
         initial, vowel, final = decompose(ch)
         vclass, has_final = vowel_class(vowel), bool(final)
         for role, (jamo, piece, unit) in parts.items():
             key = (role, jamo, vclass if role != "V" else None, has_final if role != "F" else None)
             self.bank.setdefault(key, []).append((piece, unit))
             self.bank.setdefault((role, jamo, "any", None), []).append((piece, None))
-        return True
+            self._units.setdefault((role, vclass, has_final), []).append(unit)
+        return parts
+
+    def role_box(self, role, vclass, has_final):
+        """Where this writer puts a part in a syllable of this shape (median of written ones)."""
+        units = self._units.get((role, vclass, has_final), [])
+        if len(units) >= 2:
+            return tuple(float(v) for v in np.median(np.array(units), axis=0))
+        return None
+
+    def swap(self, role, jamo, vclass, has_final):
+        """Another handwritten copy of a jamo for this position, if one was written."""
+        return self._pick((role, jamo, vclass if role != "V" else None, has_final if role != "F" else None))
 
     def _pick(self, key):
         options = self.bank.get(key)
@@ -414,6 +434,8 @@ class Composer:
         boxes = role_boxes(vclass, has_final)
         under = vclass == "bottom"
         initial_end = None  # canvas row below the initial, for stacking ㅡ ㅗ ㅜ right under it
+        initial_w = None    # ink width of the initial, to keep ㅡ in proportion
+        rng = self.rng
         for role, item in found.items():
             if isinstance(item[0], str):  # mixed vowel built from two parts
                 _paste_fit(canvas, item[1], boxes["V"][0], stretch=1.6)
@@ -425,16 +447,75 @@ class Composer:
             elif role == "V" and vclass == "mixed":
                 union = (min(b[0] for b in boxes["V"]), 0.0, 1.0, max(b[3] for b in boxes["V"]))
                 end = _paste_fit(canvas, mask, union, stretch=1.3)
+            elif self.role_box(role, vclass, has_final) is not None and not (role == "V" and vclass == "mixed"):
+                # Where and how big this writer makes such a part, keeping the jamo's own shape
+                # (a round ㅇ stays round and small, as in the writer's 우 or 은).
+                box = self.role_box(role, vclass, has_final)
+                align = "center"
+                jamo = dict(wanted)[role]
+                jitter = (rng.normal(0, 0.02), rng.normal(0, 0.02), self.rel.get(jamo, 1.0) * (1 + rng.normal(0, 0.04)))
+                if role == "V" and under and initial_end is not None:
+                    # ㅡ ㅗ ㅜ hang right under the initial, as in the writer's 은 or 두, and are
+                    # not much wider than it.
+                    shift = initial_end / canvas.shape[0] + 0.05 - box[1]
+                    box = (box[0], box[1] + shift, box[2], box[3] + shift)
+                    if initial_w:
+                        half = min((box[2] - box[0]) / 2, 1.0 * initial_w / canvas.shape[1])
+                        mid = (box[0] + box[2]) / 2
+                        box = (mid - half, box[1], mid + half, box[3])
+                    align = "top"
+                before = canvas.copy() if role == "I" else None
+                end = _paste_shape(canvas, mask, box, jitter, valign=align)
+                if before is not None:
+                    cols = np.nonzero((canvas - before).max(axis=0) > 0.2)[0]
+                    initial_w = (cols[-1] - cols[0] + 1) if len(cols) else None
             elif role == "V" and under and initial_end is not None:
                 box = boxes["V"][0]
                 top = min(initial_end / canvas.shape[0] + 0.06, box[3] - 0.25)
                 end = _paste_fit(canvas, mask, (box[0], top, box[2], box[3]), stretch=1.6, valign="top")
             else:
-                end = _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25,
-                                 widen=1.5 if (role == "I" and under) else 1.0)
+                end = _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25)
             if role == "I":
                 initial_end = end
         return canvas
+
+
+def _paste_shape(canvas, mask, unit, jitter=None, valign="center"):
+    """Place ``mask`` in ``unit`` keeping its proportions (fit by the tighter side, a little
+    overflow allowed), centred (or against the top).  ``jitter`` = (dx, dy, scale) in unit
+    coordinates."""
+    mask, _, _ = tight(mask)
+    H, W = canvas.shape
+    dx, dy, sc = jitter or (0.0, 0.0, 1.0)
+    bw, bh = (unit[2] - unit[0]) * W, (unit[3] - unit[1]) * H
+    h, w = mask.shape
+    s = min(bw * 1.1 / w, bh * 1.1 / h, max(bw / w, bh / h)) * sc
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    scaled = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+    cx, cy = (unit[0] + unit[2]) / 2 + dx, (unit[1] + unit[3]) / 2 + dy
+    left = int(round(cx * W - nw / 2))
+    top = int(round((unit[1] + dy) * H)) if valign == "top" else int(round(cy * H - nh / 2))
+    left, top = max(0, min(left, W - nw)), max(0, min(top, H - nh))
+    region = canvas[top:top + nh, left:left + nw]
+    np.maximum(region, scaled[:region.shape[0], :region.shape[1]], out=region)
+    return top + region.shape[0]
+
+
+def rebuild(ch, parts, size, composer, rng, swap_chance=0.35, jitter=0.025, scale_jitter=0.05):
+    """A fresh copy of a written syllable: its jamo put back with small independent shifts,
+    sometimes with a jamo taken from another syllable the writer wrote in the same position.
+    No two copies of a frequent syllable end up identical."""
+    initial, vowel, final = decompose(ch)
+    vclass, has_final = vowel_class(vowel), bool(final)
+    canvas = np.zeros(size, np.float32)
+    for role, (jamo, piece, unit) in parts.items():
+        if rng.random() < swap_chance:
+            other = composer.swap(role, jamo, vclass, has_final)
+            if other is not None:
+                piece = other[0]
+        j = (rng.normal(0, jitter), rng.normal(0, jitter), 1 + rng.normal(0, scale_jitter))
+        _paste_shape(canvas, piece, unit, j)
+    return canvas
 
 
 def _paste_exact(canvas, mask, unit):
