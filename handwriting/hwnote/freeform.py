@@ -383,6 +383,28 @@ def align(atoms, chars, spaces, newlines=None, ink_scale=None, width_scale=1.0):
 
 # --------------------------------------------------------------------------- driver
 
+def _align_by_line(atoms, chars, spaces, newlines, **scales):
+    """:func:`align` run separately on each text line (atoms carry their line number; a
+    transcript line starts where ``newlines`` is set).  Same return value as align."""
+    starts = [n for n, flag in enumerate(newlines) if flag] + [len(chars)]
+    line_atoms = {}
+    for i, a in enumerate(atoms):
+        line_atoms.setdefault(a["line"], []).append(i)
+    assignment, disturbed = [None] * len(chars), set()
+    for line, (c0, c1) in enumerate(zip(starts, starts[1:])):
+        idx = line_atoms.get(line, [])
+        if not idx or c1 <= c0:
+            disturbed.update(range(c0, c1))
+            continue
+        sub = [dict(a, line=0) for a in (atoms[i] for i in idx)]
+        groups, bad = align(sub, chars[c0:c1], spaces[c0:c1], None, **scales)
+        for k, g in enumerate(groups):
+            if g is not None:
+                assignment[c0 + k] = (idx[g[0]], idx[g[1]], g[2])
+        disturbed.update(c0 + k for k in bad)
+    return assignment, disturbed
+
+
 def ink_color(images):
     """Pen colour relative to the paper (0..1 RGB), like the template extractor reports."""
     samples = []
@@ -472,7 +494,12 @@ def extract_freeform(images, transcript, single_line=False, work_width=WORK_WIDT
     # Use the transcript's line breaks only if it was typed line by line like the photo.
     keep_lines = abs(transcript_lines - line_no) <= max(2, 0.3 * line_no) and transcript_lines > 1
     breaks = newlines if keep_lines else None
-    assignment, disturbed = align(atoms, chars, spaces, breaks)
+    # Copy-sheet bands are known to be one transcript line each: align them line by line
+    # (much faster on many pages, and a slip stays in its line).
+    by_line = single_line and transcript_lines == line_no == len(images)
+    run = (lambda **kw: _align_by_line(atoms, chars, spaces, newlines, **kw)) if by_line else \
+        (lambda **kw: align(atoms, chars, spaces, breaks, **kw))  # noqa: E731
+    assignment, disturbed = run()
     # Second pass: calibrate how much ink this writer uses per syllable, then use ink amounts
     # to tell similar-width characters apart.
     ratios, widths = [], []
@@ -483,8 +510,7 @@ def extract_freeform(images, transcript, single_line=False, work_width=WORK_WIDT
             widths.append((atoms[g[1]]["x1"] - atoms[g[0]]["x0"]) / h / expected_width(chars[n]))
     if len(ratios) >= 8:
         width_scale = float(np.clip(np.median(widths), 0.6, 1.4))
-        assignment, disturbed = align(atoms, chars, spaces, breaks, ink_scale=float(np.median(ratios)),
-                                      width_scale=width_scale)
+        assignment, disturbed = run(ink_scale=float(np.median(ratios)), width_scale=width_scale)
     trusted = _trusted(assignment, disturbed, spaces)
 
     # Cut out the glyphs.
