@@ -56,15 +56,15 @@ GRID_STEP = 4.24
 MID_LINE = set("-=+~×÷±∓→←⇒⇐⇔·∙:<>≤≥≠≈∞()[]{}|")
 
 # Spacing measured in the writer's notes, in units of the Hangul height.
-LETTER_GAP = {"hangul": -0.026, "latin": 0.03}
+LETTER_GAP = {"hangul": -0.045, "latin": 0.0}
 # Measured on the writer's handwriting of a known passage (see hwnote/style.py), relative to
 # the syllable height: syllables are narrower than in template boxes (w/h 0.65), the gap
 # between syllables is 0.025 +- 0.08, words are 0.47 apart, and each syllable's centre wanders
 # 0.07 up or down -- the writing follows no ruler at the top or the bottom.
 VERTICAL_WANDER = 0.21   # x messiness (0.35 by default) = 0.073 of the syllable height
-GAP_WANDER = 0.33        # x messiness = 0.115
+GAP_WANDER = 0.12        # x messiness = 0.04
 HANGUL_ASPECT = 0.875
-WORD_GAP = 0.38
+WORD_GAP = 0.5
 
 
 def _median(values, default):
@@ -377,6 +377,68 @@ def _thin(binary):
     return img[1:-1, 1:-1].astype(np.float32)
 
 
+def uniform_pen(mask, target):
+    """Redraw a rendered glyph with one round pen ``target`` px wide.
+
+    The centre line is found at output size (thin strokes survive there) and its ends are
+    pushed back out along the stroke, because thinning eats into every stroke end by about
+    half the stroke width -- short strokes such as the hook of ㄷ would otherwise shrink to
+    nothing.  Every stroke of every letter then has exactly the same width."""
+    binary = (mask > 0.35).astype(np.uint8)
+    if binary.sum() < 3:
+        return mask
+    pad = int(np.ceil(target)) + 3
+    binary = cv2.copyMakeBorder(binary, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    centre = _thin(binary)
+    radius = max(0.5, (target - 1) / 2)
+    pen = _restroke(centre, radius)
+    # Short, thick strokes (the hook of a ㄷ written in one turn of the pen) have no centre
+    # line of their own.  Keep the middle band of every stroke, ``radius`` either side of its
+    # ridge, so they survive -- at the same width as everything else.
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    reach = int(np.ceil(dist.max())) * 2 + 1
+    ridge = cv2.dilate(dist, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach)))
+    band = np.clip(dist - (ridge - 2 * radius) + 0.5, 0, 1) * (binary > 0)
+    return np.maximum(pen, band)[pad:-pad, pad:-pad]
+
+
+NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+
+
+def _extend_ends(centre, binary, dist, radius):
+    """Grow each centre-line end along its direction while the stroke continues, stopping
+    where the stroke gets narrower than the pen (so the pen's round tip meets the stroke tip)."""
+    H, W = centre.shape
+    ys, xs = np.nonzero(centre)
+    on = set(zip(ys.tolist(), xs.tolist()))
+    for y, x in list(on):
+        nb = [(y + dy, x + dx) for dy, dx in NEIGHBOURS if (y + dy, x + dx) in on]
+        if len(nb) != 1:
+            continue
+        # Direction: from a point a few steps back along the line towards the end.
+        path, prev, cur = [(y, x)], (y, x), nb[0]
+        for _ in range(5):
+            path.append(cur)
+            nxt = [(cur[0] + dy, cur[1] + dx) for dy, dx in NEIGHBOURS
+                   if (cur[0] + dy, cur[1] + dx) in on and (cur[0] + dy, cur[1] + dx) not in path]
+            if len(nxt) != 1:
+                break
+            prev, cur = cur, nxt[0]
+        by, bx = path[-1]
+        vy, vx = y - by, x - bx
+        norm = float(np.hypot(vy, vx))
+        if norm < 1:
+            continue
+        vy, vx = vy / norm, vx / norm
+        t = 0.5
+        while t < 4 * radius + 6:
+            py, px = int(round(y + vy * t)), int(round(x + vx * t))
+            if not (0 <= py < H and 0 <= px < W) or not binary[py, px] or dist[py, px] < 0.8 * radius:
+                break
+            centre[py, px] = 1.0
+            t += 0.5
+
+
 def normalize_pen(mask, target):
     """Make the strokes of a rendered glyph ``target`` px wide on average, by growing or
     shrinking them evenly from their edges.  Unlike redrawing the centre line, this keeps
@@ -458,7 +520,7 @@ class Renderer:
             # taken from the fallback font all match -- the strokes themselves are kept.
             aspect = (HANGUL_ASPECT if category == "hangul" else 1.0) * self.p.char_width.get(ch, 1.0)
             mask, _ = _transform(glyph.mask, scale, angle, elastic, rng, aspect)
-            mask = normalize_pen(mask, self.target_stroke)
+            mask = uniform_pen(mask, self.target_stroke)
         else:
             mask, _ = _transform(glyph.mask, scale, angle, elastic, rng,
                                  HANGUL_ASPECT if category == "hangul" else 1.0)
@@ -479,9 +541,9 @@ class Renderer:
             drop = (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s_mm * self.r
         gap = (LETTER_GAP[category] * o.letter_spacing + rng.normal(0, GAP_WANDER * mess)) * self.hangul_h
         # Neighbours may touch, not overlap much; a gap inside a word never looks like a space.
-        gap = float(np.clip(gap, -0.15 * self.hangul_h, 0.15 * self.hangul_h))
+        gap = float(np.clip(gap, -0.07 * self.hangul_h, 0.03 * self.hangul_h))
         return Placed(mask, int(cols[0]), int(rows[-1]), float(cols[-1] - cols[0] + 1), drop,
-                      max(gap, 0.0) * self.r)
+                      gap * self.r)
 
     def space(self):
         return WORD_GAP * self.hangul_h * self.o.word_spacing * self.r * (1 + self.rng.normal(0, 0.08 * self.o.messiness))

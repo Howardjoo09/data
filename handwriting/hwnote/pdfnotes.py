@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, PX, GlyphFactory, Options, _crisp, _paper, normalize_pen,
+from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, PX, GlyphFactory, Options, _crisp, _paper, uniform_pen,
                      _transform)
 
 DELIMS = set("()[]{}|")
@@ -122,7 +122,7 @@ class PageWriter:
         scale = s / PX
         if self.o.stroke > 0:
             mask, _ = _transform(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect)
-            mask = normalize_pen(mask, min(self.pen, 0.15 * glyph.h * s))
+            mask = uniform_pen(mask, min(self.pen, 0.15 * glyph.h * s))
         else:
             mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
             mask = _crisp(mask)
@@ -172,7 +172,7 @@ class PageWriter:
             centre += self.rng.normal(0, VERTICAL_WANDER * o.messiness * typical)
             _stamp(layer_for(c.color), mask, int(round(x - a)), int(round(centre - (t + u) / 2)))
             gap = LETTER_GAP["hangul"] * o.letter_spacing + self.rng.normal(0, GAP_WANDER * o.messiness)
-            x += (b - a + 1) + float(np.clip(gap, -0.15, 0.15)) * HANGUL_HEIGHT * em
+            x += (b - a + 1) + float(np.clip(gap, -0.07, 0.03)) * HANGUL_HEIGHT * em
 
     def _reflow(self, chars, plans, body):
         """Horizontal shift (points) per character for lines that are plain text.
