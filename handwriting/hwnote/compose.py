@@ -54,8 +54,10 @@ def tight(mask, threshold=0.05):
     return mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1], ys.min(), xs.min()
 
 
-def _paste_fit(canvas, mask, box, stretch=1.25):
-    """Scale ``mask`` into ``box`` (unit coords of ``canvas``) and composite it (max)."""
+def _paste_fit(canvas, mask, box, stretch=1.25, valign="center"):
+    """Scale ``mask`` into ``box`` (unit coords of ``canvas``) and composite it (max).
+
+    ``valign="bottom"`` rests it on the box floor (a vowel under the initial, like ㅡ)."""
     mask, _, _ = tight(mask)
     H, W = canvas.shape
     x0, y0, x1, y1 = box[0] * W, box[1] * H, box[2] * W, box[3] * H
@@ -69,7 +71,7 @@ def _paste_fit(canvas, mask, box, stretch=1.25):
     nw, nh = max(1, int(round(w * sx))), max(1, int(round(h * sy)))
     scaled = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
     left = int(round(x0 + (bw - nw) / 2))
-    top = int(round(y0 + (bh - nh) / 2))
+    top = int(round(y1 - nh)) if valign == "bottom" else int(round(y0 + (bh - nh) / 2))
     left, top = max(0, min(left, W - nw)), max(0, min(top, H - nh))
     region = canvas[top:top + nh, left:left + nw]
     np.maximum(region, scaled[:region.shape[0], :region.shape[1]], out=region)
@@ -139,7 +141,8 @@ def compose_syllable(ch, source, width_px, height_px):
         else:
             b_init, b_vowel, b_final = RIGHT[has_final]
         _paste_fit(canvas, first, b_init)
-        _paste_fit(canvas, middle, b_vowel, stretch=1.6)
+        floor = vowel in BOTTOM_VOWELS and not has_final
+        _paste_fit(canvas, middle, b_vowel, stretch=1.6, valign="bottom" if floor else "center")
     if has_final:
         _paste_fit(canvas, last, b_final)
     return canvas
@@ -413,7 +416,9 @@ class Composer:
                 union = (min(b[0] for b in boxes["V"]), 0.0, 1.0, max(b[3] for b in boxes["V"]))
                 _paste_fit(canvas, mask, union, stretch=1.3)
             else:
-                _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25)
+                floor = role == "V" and vclass == "bottom" and not has_final
+                _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25,
+                           valign="bottom" if floor else "center")
         return canvas
 
 

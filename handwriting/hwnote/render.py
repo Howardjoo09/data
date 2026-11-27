@@ -12,7 +12,7 @@ import pymupdf
 from PIL import Image, ImageDraw, ImageFont
 
 from . import charsets
-from .compose import Composer, JamoSource, match_stroke, stroke_width, tight
+from .compose import Composer, JamoSource, match_stroke, stroke_width, tight, vowel_class
 
 PX = 10  # profile resolution, px per mm
 BASELINE_LETTERS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZacemnorsuvwxz0123456789")
@@ -109,10 +109,32 @@ class GlyphFactory:
         self.jamo = JamoSource(standalone)
         self.composer = Composer(standalone, rng)
         self.harvested = 0
+        by_shape = {}
         for c, variants in profile.glyphs.items():
             if charsets.is_syllable(c):
                 self.harvested += sum(self.composer.learn(c, g.mask) for g in variants)
+                by_shape.setdefault(self.shape(c), []).extend(variants)
+        # How big this writer makes each shape of syllable: 고 is flatter than 를, 이 narrower
+        # than 했.  Unwritten syllables are built at the size of their written relatives.
+        pad = 4 / PX  # glyph images carry a 2 px margin on each side
+        self.shape_size = {key: (float(np.median([g.w for g in gs])) - pad,
+                                 float(np.median([g.h for g in gs])) - pad,
+                                 float(np.median([g.top + g.h for g in gs])) - pad / 2)
+                           for key, gs in by_shape.items() if len(gs) >= 2}
         self._font_cache = {}
+
+    @staticmethod
+    def shape(ch):
+        _, vowel, final = charsets.decompose(ch)
+        return vowel_class(vowel), bool(final)
+
+    def _shape_size(self, ch):
+        vclass, has_final = self.shape(ch)
+        for key in ((vclass, has_final),
+                    ({"right": "right_wide", "right_wide": "right"}.get(vclass, vclass), has_final)):
+            if key in self.shape_size:
+                return self.shape_size[key]
+        return None
 
     def _pick(self, ch):
         variants = self.p.glyphs[ch]
@@ -130,7 +152,8 @@ class GlyphFactory:
             return self._pick(ch), category
         if charsets.is_syllable(ch):
             p = self.p
-            w_px, h_px = int(round(p.hangul_w * PX)), int(round(p.hangul_h * PX))
+            w_mm, h_mm, bottom = self._shape_size(ch) or (p.hangul_w, p.hangul_h, p.hangul_bottom)
+            w_px, h_px = max(8, int(round(w_mm * PX))), max(8, int(round(h_mm * PX)))
             mask = self.composer.compose(ch, w_px, h_px)
             if mask is not None and mask.max() > 0:
                 self.composed.add(ch)
@@ -143,7 +166,7 @@ class GlyphFactory:
                 if grow > 1.0:
                     cropped = cv2.resize(cropped, None, fx=grow, fy=grow, interpolation=cv2.INTER_LINEAR)
                     r0 = h_px - (h_px - r0) * grow
-                return Glyph(cropped, p.hangul_bottom - p.hangul_h + r0 / PX,
+                return Glyph(cropped, bottom - h_mm + r0 / PX,
                              cropped.shape[1] / PX, cropped.shape[0] / PX), category
         if charsets.is_jamo(ch):
             mask = self.jamo.get(ch)  # e.g. ㄺ written on its own: join ㄹ and ㄱ

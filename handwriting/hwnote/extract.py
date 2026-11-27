@@ -16,6 +16,8 @@ PX = 10                  # canonical resolution: pixels per millimetre
 INSET = 0.7              # mm cut from each side of a writing box (skips the printed border)
 ALPHA_LO, ALPHA_HI = 0.24, 0.55   # darkness range mapped to ink opacity 0..1
 MIN_INK = 25.0           # summed opacity below which a box counts as empty
+MIN_INK_SMALL = 5.0      # ... for characters that are only a dot or two
+SMALL_CHARS = set(".,:;'`\"·")
 
 
 class ExtractError(ValueError):
@@ -121,11 +123,16 @@ def _clean(alpha):
     base = int(round((T.BASELINE - INSET) * PX))
     for i in range(1, n):
         x, y, bw, bh, area = stats[i]
+        piece = labels == i
         touches = x == 0 or y == 0 or x + bw >= w or y + bh >= h
         border_line = touches and ((bh <= 8 and bw >= 25) or (bw <= 8 and bh >= 25))
-        guide_dash = y >= base - 4 and y + bh <= base + 5 and area < 80 and bh <= 6
-        if area < 10 or border_line or guide_dash:
-            alpha[labels == i] = 0
+        # Remnants of the dotted baseline are flat dashes; a full stop on the baseline is round.
+        guide_dash = (y >= base - 4 and y + bh <= base + 5 and area < 80 and bh <= 6
+                      and bw >= 2.5 * bh)
+        # Dust is tiny or faint; the dot of a fine pen (. : ! i) is small but dark.
+        dust = area < 4 or (area < 12 and alpha[piece].mean() < 0.55)
+        if dust or border_line or guide_dash:
+            alpha[piece] = 0
     return alpha
 
 
@@ -139,7 +146,7 @@ def extract_page(page, chars):
         x0, y0 = int(round((bx + INSET) * PX)), int(round((by + INSET) * PX))
         x1, y1 = int(round((bx + T.BOX - INSET) * PX)), int(round((by + T.BOX - INSET) * PX))
         alpha = _clean(alpha_page[y0:y1, x0:x1].copy())
-        if alpha.sum() < MIN_INK:
+        if alpha.sum() < (MIN_INK_SMALL if ch in SMALL_CHARS else MIN_INK):
             empty.append(ch)
             continue
         ys, xs = np.nonzero(alpha > 0.08)
