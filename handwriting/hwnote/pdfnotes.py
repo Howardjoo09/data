@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (GAP_WANDER, HANGUL_ASPECT, LETTER_GAP, MID_LINE, VERTICAL_WANDER, WORD_GAP, PX, GlyphFactory, Options, _crisp, _paper, pen_glyph,
+from .render import (GAP_WANDER, HANGUL_ASPECT, INK_GAP, LETTER_GAP, MID_LINE, VERTICAL_WANDER, WORD_GAP, InkSpacer, PX, GlyphFactory, Options, _crisp, _paper, pen_glyph,
                      _transform)
 
 DELIMS = set("()[]{}|")
@@ -110,7 +110,9 @@ class PageWriter:
         o, rng, mess = self.o, self.rng, self.o.messiness
         glyph, cat = self.factory.get(ch)
         ref = self.p.hangul_h if cat == "hangul" else self.p.cap_h
-        s = height_px / ref * (1 + rng.normal(0, 0.015 * mess)) * self.p.char_scale.get(ch, 1.0)
+        s = height_px / ref
+        if not charsets.is_syllable(ch):  # every syllable the same height
+            s *= (1 + rng.normal(0, 0.015 * mess)) * self.p.char_scale.get(ch, 1.0)
         ink_h = glyph.h - 4 / PX
         typical = self.factory.typical_height(ch)
         if typical and ink_h > 0 and o.evenness > 0:
@@ -199,26 +201,29 @@ class PageWriter:
         word's (shifted) printed start -- print gives every syllable a full square."""
         k, o = self.k, self.o
         x = (word[0].bbox[0] + shift.get(id(word[0]), 0.0)) * k
+        spacer = InkSpacer(0.12 * HANGUL_HEIGHT * word[0].size * k)
         for c in word:
             em = c.size * k
             glyph, cat, s = plans[id(c)]
-            mask, box = self._render(glyph, s, self.rng.normal(0, 0.6 * o.messiness),
-                                     HANGUL_ASPECT * self.p.char_width.get(c.ch, 1.0))
+            mask, box = self._render(glyph, s, self.rng.normal(0, 0.4 * o.messiness),
+                                     HANGUL_ASPECT * self.factory.hangul_aspect(c.ch, glyph, self.p.char_width.get(c.ch, 1.0)))
             if box is None:
                 continue
             a, b, t, u = box
-            # Bottoms of a line's syllables in one row, on the printed baseline.
-            bottom = c.origin[1] * k + 0.04 * em
-            bottom += self.rng.normal(0, VERTICAL_WANDER * o.messiness * HANGUL_HEIGHT * em)
-            _stamp(layer_for(c.color), mask, int(round(x - a)), int(round(bottom - u)))
-            gap = LETTER_GAP["hangul"] * o.letter_spacing + self.rng.normal(0, GAP_WANDER * o.messiness)
-            x += (b - a + 1) + float(np.clip(gap, -0.08, 0.0)) * HANGUL_HEIGHT * em
+            # Bottoms of a line's syllables in one row, on the printed baseline (tops follow,
+            # since every syllable has the same height).
+            y0 = int(round(c.origin[1] * k + 0.04 * em - u))
+            target = (INK_GAP * o.letter_spacing + self.rng.normal(0, 0.012 * o.messiness)) * HANGUL_HEIGHT * em
+            x0 = spacer.place(mask, y0, int(round(x - a)), target)
+            _stamp(layer_for(c.color), mask, x0, y0)
+            x = x0 + b + 1
 
     def _width(self, c, plans, sym):
         """Drawn width (points) of one character."""
         if id(c) in plans:
-            return (max(plans[id(c)][0].w - 4 / PX, 0.3) * plans[id(c)][2] * HANGUL_ASPECT
-                    * self.p.char_width.get(c.ch, 1.0) / self.k)
+            glyph = plans[id(c)][0]
+            return (max(glyph.w - 4 / PX, 0.3) * plans[id(c)][2] * HANGUL_ASPECT
+                    * self.factory.hangul_aspect(c.ch, glyph, self.p.char_width.get(c.ch, 1.0)) / self.k)
         if id(c) in sym:
             return sym[id(c)][2]
         return c.bbox[2] - c.bbox[0]
@@ -365,6 +370,18 @@ class PageWriter:
             for j in range(i + 1, len(rows)):
                 if bands[j][0] < bands[i][1] + 0.3 * body and bands[j][1] > bands[i][0] - 0.3 * body:
                     parent[find(i, parent)] = find(j, parent)
+        # Rows on either side of a fraction bar belong together, however far apart (a
+        # fraction of fractions stacks several rows).
+        for bar in (c for c in chars if c.ch == mathfont.FRACTION):
+            y = (bar.bbox[1] + bar.bbox[3]) / 2
+            touching = []
+            for i, (_, r) in enumerate(rows):
+                xs = [c for c in r if c.bbox[2] > bar.bbox[0] and c.bbox[0] < bar.bbox[2]]
+                # (font boxes are tall: a denominator's box may reach up past its bar)
+                if xs and bands[i][0] < y + 1.2 * body and bands[i][1] > y - 1.2 * body:
+                    touching.append(i)
+            for i in touching[1:]:
+                parent[find(i, parent)] = find(touching[0], parent)
         groups = {}
         for i in range(len(rows)):
             groups.setdefault(find(i, parent), []).append(i)
@@ -375,7 +392,8 @@ class PageWriter:
                 continue
             mid = (c.bbox[1] + c.bbox[3]) / 2
             g = min(gband, key=lambda g: max(gband[g][0] - mid, 0.0, mid - gband[g][1]))
-            if max(gband[g][0] - mid, 0.0, mid - gband[g][1]) <= 0.6 * body:
+            # Deep stacks (a fraction of fractions) reach well below their line.
+            if max(gband[g][0] - mid, 0.0, mid - gband[g][1]) <= 1.6 * body:
                 extra[g].append(c)
 
         word_gap = WORD_GAP * HANGUL_HEIGHT * self.o.word_spacing
@@ -418,9 +436,8 @@ class PageWriter:
                 x1 = max(c.bbox[2] for c in w)
                 size = max(c.size for c in w) if kind != "block" else body
                 if kind == "word":
-                    width = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT
-                                * self.p.char_width.get(x.ch, 1.0) / k for x in w)
-                    width += letter_gap * sum(x.size for x in w[1:])
+                    width = sum(self._width(x, plans, sym) for x in w)
+                    width += (INK_GAP * HANGUL_HEIGHT - 0.05) * sum(x.size for x in w[1:])
                 elif kind == "sym":
                     width = sym[id(w[0])][2]
                 else:

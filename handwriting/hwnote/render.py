@@ -61,10 +61,18 @@ LETTER_GAP = {"hangul": -0.06, "latin": -0.01}
 # the syllable height: syllables are narrower than in template boxes (w/h 0.65), the gap
 # between syllables is 0.025 +- 0.08, words are 0.47 apart, and each syllable's centre wanders
 # 0.07 up or down -- the writing follows no ruler at the top or the bottom.
-VERTICAL_WANDER = 0.03   # x messiness (0.35 by default) = 0.01 of the syllable height
+VERTICAL_WANDER = 0.0    # tops and bottoms of a line's syllables each in one row
 GAP_WANDER = 0.12        # x messiness = 0.04
 HANGUL_ASPECT = 0.875
-WORD_GAP = 0.5
+# Each syllable's width stays within this share of the typical width for its shape (a narrow
+# 러 next to a wide 한 looked shrunken).
+ASPECT_TOLERANCE = 0.15
+# Neighbouring letters are spaced by the nearest distance between their ink (not their boxes),
+# so the gap looks the same whatever the letters' shapes: this share of the syllable height.
+INK_GAP = 0.045
+# How alike (0..1) a rebuilt copy of a syllable must be to the one written, to be used.
+REBUILD_MIN_SIMILARITY = 0.72
+WORD_GAP = 0.42
 
 
 def _median(values, default):
@@ -184,8 +192,10 @@ class GlyphFactory:
                     parts = self.composer.learn(c, g.mask)
                     if parts:
                         self.parts[id(g)] = parts
-                        self.harvested += 1
                 by_shape.setdefault(self.shape(c), []).extend(variants)
+        rejected = self.composer.finalize()
+        self.parts = {k: v for k, v in self.parts.items() if id(v) not in rejected}
+        self.harvested = len(self.parts)
         # How big this writer makes each shape of syllable: 고 is flatter than 를, 이 narrower
         # than 했.  Unwritten syllables are built at the size of their written relatives.
         pad = 4 / PX  # glyph images carry a 2 px margin on each side
@@ -204,8 +214,18 @@ class GlyphFactory:
         depth = [(g.top + g.h - profile.latin_bottom) / max(g.h - pad, 0.1)
                  for c, gs in profile.glyphs.items() if latin_class(c) == "desc" for g in gs]
         self.desc_depth = float(np.clip(np.median(depth), 0.2, 0.6)) if depth else 0.4
+        heights = [g.h - pad for c, gs in profile.glyphs.items() if charsets.is_syllable(c) for g in gs]
+        self.syllable_h = float(np.median(heights)) if heights else profile.hangul_h - pad
         self._font_cache = {}
         self._skeletons = {}
+        self._signatures = {}
+
+    def _similar(self, glyph, mask):
+        from .freeform import _signature
+        key = id(glyph)
+        if key not in self._signatures:
+            self._signatures[key] = (glyph, _signature(glyph.mask))
+        return float(self._signatures[key][1] @ _signature(mask))
 
     def latin_drop(self, ch, glyph, s):
         """How far (in the units of ``s``) the ink bottom of a Latin letter goes below the line:
@@ -233,14 +253,26 @@ class GlyphFactory:
         """Ink height (profile mm) every copy of ``ch`` is drawn at: the writer's typical height
         for this kind of character, rather than whatever size it had in its template box."""
         if charsets.is_syllable(ch):
-            size = self._shape_size(ch)
-            return size[1] if size else None
+            return self.syllable_h  # one height for all: tops and bottoms each in one row
         cls = latin_class(ch)
         if cls == "delta":
             short = self.latin_size.get("short")
             return short * CLASS_SCALE["short"] * DELTA_OVER_SHORT if short else None
         size = self.latin_size.get(cls) if cls else None
         return size * CLASS_SCALE.get(cls, 1.0) if size else None
+
+    def hangul_aspect(self, ch, glyph, extra=1.0):
+        """Factor for a syllable's width: its own proportions, kept within ASPECT_TOLERANCE of
+        the typical proportions of syllables of the same shape."""
+        if not charsets.is_syllable(ch) or glyph.h <= 0.5:
+            return extra
+        own = (glyph.w - 4 / PX) / (glyph.h - 4 / PX)
+        size = self._shape_size(ch)
+        if not size or own <= 0:
+            return extra
+        typical = size[0] / size[1]
+        want = float(np.clip(own * extra, typical * (1 - ASPECT_TOLERANCE), typical * (1 + ASPECT_TOLERANCE)))
+        return want / own
 
     def _shape_size(self, ch):
         vclass, has_final = self.shape(ch)
@@ -267,7 +299,12 @@ class GlyphFactory:
             parts = self.parts.get(id(g))
             if parts and self.vary:
                 mask = rebuild(ch, parts, compose_size(g.mask), self.composer, self.rng)
-                return Glyph(_with_margin(g.mask, mask), g.top, g.w, g.h, variant=True), category
+                inner, _, _ = tight(mask)
+                # A rebuilt copy must still look like the syllable as written; when the cut
+                # into jamo went wrong (a stroke shared by ㄹ and ㅗ) the original is used.
+                if self._similar(g, inner) >= REBUILD_MIN_SIMILARITY:
+                    inner = cv2.copyMakeBorder(inner, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=0)
+                    return Glyph(inner, g.top, inner.shape[1] / PX, inner.shape[0] / PX, variant=True), category
             return g, category
         if charsets.is_syllable(ch):
             p = self.p
@@ -613,17 +650,21 @@ class Renderer:
     def place(self, ch):
         o, mess, rng = self.o, self.o.messiness, self.rng
         glyph, category = self.factory.get(ch)
-        s_mm = self.scale[category] * (1 + rng.normal(0, 0.02 * mess)) * self.p.char_scale.get(ch, 1.0)
+        syllable = charsets.is_syllable(ch)
+        s_mm = self.scale[category] * (1 + (0 if syllable else rng.normal(0, 0.02 * mess)))
+        if not syllable:
+            s_mm *= self.p.char_scale.get(ch, 1.0)
         ink_h = glyph.h - 4 / PX  # the glyph image carries a 2 px margin
         typical = self.factory.typical_height(ch)
         if typical and ink_h > 0 and o.evenness > 0:
             s_mm *= float(np.clip((typical / ink_h) ** o.evenness, 0.6, 1.6))
         scale = s_mm * self.r / PX
-        angle, elastic = rng.normal(0, 0.8 * mess), 0.006 * mess
+        angle, elastic = rng.normal(0, 0.4 * mess), 0.006 * mess
         if o.stroke > 0:
             # Same pen width for every character, so letters copied, assembled from jamo or
             # taken from the fallback font all match -- the strokes themselves are kept.
-            aspect = (HANGUL_ASPECT if category == "hangul" else 1.0) * self.p.char_width.get(ch, 1.0)
+            aspect = (HANGUL_ASPECT if category == "hangul" else 1.0) * \
+                self.factory.hangul_aspect(ch, glyph, self.p.char_width.get(ch, 1.0))
             mask = pen_glyph(glyph.mask, scale, angle, elastic, rng, aspect, self.target_stroke)
         else:
             mask, _ = _transform(glyph.mask, scale, angle, elastic, rng,
@@ -701,13 +742,62 @@ class Renderer:
         x = left
         ink = np.array(self.ink, np.float32)
         jitter = VERTICAL_WANDER * mess * self.typical_ink_px
+        spacer = InkSpacer(0.12 * self.typical_ink_px)
         for g in line:
             if g is None:
                 x += self.space()
+                spacer.reset()
                 continue
-            y_bottom = baseline + g.drop + rng.normal(0, jitter)
-            _composite(page, g.mask, int(round(x)) - g.left, int(round(y_bottom)) - g.bottom, ink)
-            x += g.width + g.gap
+            y0 = int(round(baseline + g.drop + (rng.normal(0, jitter) if jitter else 0.0))) - g.bottom
+            target = (INK_GAP * self.o.letter_spacing + rng.normal(0, 0.012 * mess)) * self.typical_ink_px
+            x0 = spacer.place(g.mask, y0, int(round(x)) - g.left, target)
+            _composite(page, g.mask, x0, y0, ink)
+            x = x0 + g.left + g.width
+
+
+class InkSpacer:
+    """Places letters one after another so that the nearest ink of neighbours is a set
+    distance apart.  Spacing by bounding boxes makes the visible gap depend on the letters'
+    shapes (이 then 러 looked jammed together, 고 then 다 far apart)."""
+
+    def __init__(self, band):
+        self.band = max(1, int(band))  # rows above/below also count (slanted strokes)
+        self.reset()
+
+    def reset(self):
+        self.top = None
+        self.right = None
+        self.end = None
+
+    def place(self, mask, y0, x_box, target):
+        """Left edge (page px) for ``mask`` with top row ``y0``.  ``x_box`` is where bounding-box
+        spacing would put it; it is used when the letters share no rows."""
+        ink = mask > 0.3
+        rows = np.nonzero(ink.any(axis=1))[0]
+        if len(rows) == 0:
+            return x_box
+        left = ink[rows].argmax(axis=1)
+        right = ink.shape[1] - 1 - ink[rows][:, ::-1].argmax(axis=1)
+        x0 = x_box
+        if self.right is not None:
+            idx = rows + y0 - self.top
+            ok = (idx >= 0) & (idx < len(self.right))
+            if ok.any():
+                need = self.right[idx[ok]] - left[ok]
+                need = need[np.isfinite(need)]
+                if len(need):
+                    x0 = int(round(need.max() + target))
+            # never pull a letter back over the previous one's middle
+            x0 = max(x0, int(round(self.end - 0.25 * (self.end - self.start))) - int(left.min()))
+        # Remember this letter's right edge per row, widened by ``band`` rows.
+        top = y0 + rows.min()
+        prof = np.full(rows.max() - rows.min() + 1 + 2 * self.band, -np.inf)
+        for r, rx in zip(rows - rows.min(), right + x0):
+            lo, hi = r, r + 2 * self.band + 1
+            prof[lo:hi] = np.maximum(prof[lo:hi], rx)
+        self.top, self.right = top - self.band, prof
+        self.start, self.end = x0 + int(left.min()), x0 + int(right.max())
+        return x0
 
 
 def _composite(page, alpha, x0, y0, ink):

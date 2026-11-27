@@ -9,6 +9,14 @@ import numpy as np
 from .charsets import BOTTOM_VOWELS, JAMO_PARTS, MIXED_VOWELS, RIGHT_VOWELS, decompose
 
 WIDE_RIGHT = set("ㅐㅒㅔㅖ")
+# Finals made of two consonants: the third kind of syllable (값, 닭, 있 ...).
+DOUBLE_FINALS = set("ㄲㄳㄵㄶㄺㄻㄼㄽㄾㄿㅀㅄㅆ")
+
+
+def final_kind(ch):
+    """0: no final, 1: one final consonant, 2: two (값, 닭, 있)."""
+    final = decompose(ch)[2]
+    return 0 if not final else (2 if final in DOUBLE_FINALS else 1)
 
 # Jamo the writer draws larger in running writing than in template boxes (measured on the
 # writer's own sentences: an initial ㅇ fills 48% of the syllable height there, 42% in the
@@ -377,6 +385,8 @@ class Composer:
         parts = harvest(ch, mask)
         if not parts:
             return None
+        self.records = getattr(self, "records", [])
+        self.records.append((ch, parts))
         initial, vowel, final = decompose(ch)
         vclass, has_final = vowel_class(vowel), bool(final)
         for role, (jamo, piece, unit) in parts.items():
@@ -384,13 +394,55 @@ class Composer:
             self.bank.setdefault(key, []).append((piece, unit))
             self.bank.setdefault((role, jamo, "any", None), []).append((piece, None))
             self._units.setdefault((role, vclass, has_final), []).append(unit)
+            if final in DOUBLE_FINALS:
+                self._units.setdefault((role, vclass, "double"), []).append(unit)
         return parts
 
-    def role_box(self, role, vclass, has_final):
-        """Where this writer puts a part in a syllable of this shape (median of written ones)."""
-        units = self._units.get((role, vclass, has_final), [])
-        if len(units) >= 2:
-            return tuple(float(v) for v in np.median(np.array(units), axis=0))
+    def finalize(self, min_similarity=0.35, margin=0.25):
+        """Drop jamo that were cut out badly (half an ㅇ, an ㅇ with a neighbour's stroke
+        attached): each piece is compared with the other pieces of the same jamo in the same
+        role, and one unlike the rest is not used.  The bank and the standard boxes are rebuilt
+        from the remaining syllables.  Returns the ids of the parts dicts that were rejected."""
+        from .freeform import _signature
+        records = getattr(self, "records", [])
+        groups = {}
+        for n, (ch, parts) in enumerate(records):
+            for role, (jamo, piece, unit) in parts.items():
+                groups.setdefault((role, jamo), []).append((n, piece))
+        bad = set()
+        for items in groups.values():
+            if len(items) < 3:
+                continue
+            sig = np.stack([_signature(p) for _, p in items])
+            sim = sig @ sig.T
+            np.fill_diagonal(sim, np.nan)
+            typical = np.nanmedian(sim, axis=1)
+            floor = max(min_similarity, float(np.median(typical)) - margin)
+            bad.update(n for (n, _), t in zip(items, typical) if t < floor)
+        self.bank, self._units = {}, {}
+        for n, (ch, parts) in enumerate(records):
+            if n in bad:
+                continue
+            initial, vowel, final = decompose(ch)
+            vclass, has_final = vowel_class(vowel), bool(final)
+            for role, (jamo, piece, unit) in parts.items():
+                key = (role, jamo, vclass if role != "V" else None, has_final if role != "F" else None)
+                self.bank.setdefault(key, []).append((piece, unit))
+                self.bank.setdefault((role, jamo, "any", None), []).append((piece, None))
+                self._units.setdefault((role, vclass, has_final), []).append(unit)
+                if final in DOUBLE_FINALS:
+                    self._units.setdefault((role, vclass, "double"), []).append(unit)
+        return {id(records[n][1]) for n in bad}
+
+    def role_box(self, role, vclass, has_final, double=False):
+        """Where and how big this writer makes a part in a syllable of this kind (median of the
+        written ones).  Every syllable of the same kind uses the same boxes, so the initials of
+        all such syllables come out the same size, and so do their vowels and finals."""
+        keys = ([(role, vclass, "double")] if double else []) + [(role, vclass, has_final)]
+        for key in keys:
+            units = self._units.get(key, [])
+            if len(units) >= 2:
+                return tuple(float(v) for v in np.median(np.array(units), axis=0))
         return None
 
     def swap(self, role, jamo, vclass, has_final):
@@ -438,6 +490,7 @@ class Composer:
             return None
         boxes = role_boxes(vclass, has_final)
         under = vclass == "bottom"
+        ends = {}
         initial_end = None  # canvas row below the initial, for stacking ㅡ ㅗ ㅜ right under it
         initial_w = None    # ink width of the initial, to keep ㅡ in proportion
         rng = self.rng
@@ -447,22 +500,25 @@ class Composer:
                 _paste_fit(canvas, item[2], boxes["V"][1], stretch=1.6)
                 continue
             mask, unit = item
-            if unit is not None:
+            standard = self.role_box(role, vclass, has_final, final in DOUBLE_FINALS)
+            if unit is not None and standard is None:
                 jamo = dict(wanted)[role]
                 if jamo in NOTE_SIZE:
                     end = _paste_shape(canvas, mask, unit, (0.0, 0.0, NOTE_SIZE[jamo]))
                 else:
                     end = _paste_exact(canvas, mask, unit)
-            elif role == "V" and vclass == "mixed":
+            elif role == "V" and vclass == "mixed" and standard is None:
                 union = (min(b[0] for b in boxes["V"]), 0.0, 1.0, max(b[3] for b in boxes["V"]))
                 end = _paste_fit(canvas, mask, union, stretch=1.3)
-            elif self.role_box(role, vclass, has_final) is not None and not (role == "V" and vclass == "mixed"):
-                # Where and how big this writer makes such a part, keeping the jamo's own shape
-                # (a round ㅇ stays round and small, as in the writer's 우 or 은).
-                box = self.role_box(role, vclass, has_final)
+            elif standard is not None:
+                # The standard place and size of this part for this kind of syllable, keeping
+                # the jamo's own shape (a round ㅇ stays round).
+                box = standard
                 align = "center"
+                if role == "F":
+                    box, align = _below(box, role, vclass, ends, canvas.shape[0])
                 jamo = dict(wanted)[role]
-                jitter = (rng.normal(0, 0.02), rng.normal(0, 0.02), self.rel.get(jamo, 1.0) * (1 + rng.normal(0, 0.04)))
+                jitter = (rng.normal(0, 0.012), rng.normal(0, 0.012), NOTE_SIZE.get(jamo, 1.0) * (1 + rng.normal(0, 0.03)))
                 if role == "V" and under and initial_end is not None:
                     # ㅡ ㅗ ㅜ hang right under the initial, as in the writer's 은 or 두, and are
                     # not much wider than it.
@@ -474,7 +530,8 @@ class Composer:
                         box = (mid - half, box[1], mid + half, box[3])
                     align = "top"
                 before = canvas.copy() if role == "I" else None
-                end = _paste_shape(canvas, mask, box, jitter, valign=align)
+                end = _paste_role(canvas, mask, box, role, vclass, jitter, valign=align)
+                ends[role] = end
                 if before is not None:
                     cols = np.nonzero((canvas - before).max(axis=0) > 0.2)[0]
                     initial_w = (cols[-1] - cols[0] + 1) if len(cols) else None
@@ -510,24 +567,92 @@ def _paste_shape(canvas, mask, unit, jitter=None, valign="center"):
     return top + region.shape[0]
 
 
-def rebuild(ch, parts, size, composer, rng, swap_chance=0.35, jitter=0.025, scale_jitter=0.05):
+def _paste_role(canvas, mask, box, role, vclass, jitter=(0.0, 0.0, 1.0), valign="center"):
+    """Put a jamo in the standard box for its part of the syllable, sized so that the same
+    part has the same size in every syllable of the kind: vowels under the initial (ㅗ ㅜ ㅡ ㅠ)
+    get the box's width, vowels on the right (ㅏ ㅓ ㅣ) its height, consonants its area.  A
+    tall ㅠ is then as wide as a flat ㅡ instead of being squeezed into ㅡ's flat box."""
+    mask, _, _ = tight(mask)
+    H, W = canvas.shape
+    dx, dy, sc = jitter
+    bw, bh = (box[2] - box[0]) * W, (box[3] - box[1]) * H
+    h, w = mask.shape
+    if role == "V" and vclass == "bottom":
+        s = bw / w
+    elif role == "V" and vclass in ("right", "right_wide"):
+        s = bh / h
+    elif role == "V":
+        s = min(bw / w, bh / h) * 1.05
+    else:
+        s = float(np.sqrt((bw / w) * (bh / h)))
+        s = min(s, 1.3 * min(bw / w, bh / h))
+    s *= sc
+    nw, nh = max(1, int(round(w * s))), max(1, int(round(h * s)))
+    nw, nh = min(nw, W), min(nh, H)
+    scaled = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+    cx = (box[0] + box[2]) / 2 + dx
+    left = int(round(cx * W - nw / 2))
+    if valign == "top":
+        top = int(round((box[1] + dy) * H))
+    else:
+        top = int(round(((box[1] + box[3]) / 2 + dy) * H - nh / 2))
+    left, top = max(0, min(left, W - nw)), max(0, min(top, H - nh))
+    region = canvas[top:top + nh, left:left + nw]
+    np.maximum(region, scaled[:region.shape[0], :region.shape[1]], out=region)
+    return top + region.shape[0]
+
+
+def rebuild(ch, parts, size, composer, rng, swap_chance=0.35, jitter=0.012, scale_jitter=0.03):
     """A fresh copy of a written syllable: its jamo put back with small independent shifts,
     sometimes with a jamo taken from another syllable the writer wrote in the same position.
     No two copies of a frequent syllable end up identical."""
     initial, vowel, final = decompose(ch)
     vclass, has_final = vowel_class(vowel), bool(final)
-    canvas = np.zeros(size, np.float32)
-    for role, (jamo, piece, unit) in parts.items():
+    # Room below: parts are stacked (initial, the vowel under it, the final under both) and
+    # the caller crops and scales the result to the common syllable height.
+    H0, W0 = size
+    canvas = np.zeros((int(H0 * 1.5), int(W0 * 1.2)), np.float32)
+    ends = {}
+    for role in ("I", "V", "F"):
+        if role not in parts:
+            continue
+        jamo, piece, unit = parts[role]
         if rng.random() < swap_chance:
             other = composer.swap(role, jamo, vclass, has_final)
             # Only swap in a copy drawn with a similar density of ink: a small, heavily inked
             # ㅇ blown up to this size would read as a dot.
             if other is not None and abs(_fill(other[0]) - _fill(piece)) <= 0.35 * _fill(piece):
                 piece = other[0]
+        # Each part goes to the standard place for its kind of syllable, so the same part has
+        # the same size in every syllable of that kind.
+        standard = composer.role_box(role, vclass, has_final, final in DOUBLE_FINALS)
         grow = NOTE_SIZE.get(jamo, 1.0)
         j = (rng.normal(0, jitter), rng.normal(0, jitter), grow * (1 + rng.normal(0, scale_jitter)))
-        _paste_shape(canvas, piece, unit, j)
+        box = standard if standard is not None else unit
+        box = (box[0] * W0 / canvas.shape[1], box[1] * H0 / canvas.shape[0],
+               box[2] * W0 / canvas.shape[1], box[3] * H0 / canvas.shape[0])
+        box, valign = _below(box, role, vclass, ends, canvas.shape[0])
+        if standard is None:
+            ends[role] = _paste_shape(canvas, piece, box, j, valign=valign)
+        else:
+            ends[role] = _paste_role(canvas, piece, box, role, vclass, j, valign=valign)
     return canvas
+
+
+def _below(box, role, vclass, ends, H, gap=0.03):
+    """Move a part's box down so it starts under the parts above it: a vowel under the
+    initial (유, 고), a final under the initial and such a vowel (각, 곡)."""
+    above = []
+    if role == "V" and vclass == "bottom" and "I" in ends:
+        above.append(ends["I"])
+    if role == "F":
+        above += [ends[r] for r in ("I",) if r in ends]
+        if vclass in ("bottom", "mixed") and "V" in ends:
+            above.append(ends["V"])
+    if not above:
+        return box, "center"
+    top = max(box[1], max(above) / H + gap)
+    return (box[0], top, box[2], top + (box[3] - box[1])), "top"
 
 
 def _fill(mask):
