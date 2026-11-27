@@ -36,10 +36,22 @@ class Options:
     size: float = 0.6           # Hangul height as a fraction of the line pitch
     letter_spacing: float = 1.0
     word_spacing: float = 1.0
-    messiness: float = 0.5      # 0 = perfectly regular, 1 = very loose
+    messiness: float = 0.35     # 0 = perfectly regular, 1 = loose
     margin_line: bool = True
-    dpi: int = 200
+    dpi: int = 300
     seed: int | None = None
+    # Pen width as a fraction of the Hangul height (0.12 in the writer's own notes); 0 keeps
+    # the strokes exactly as written in the template.
+    stroke: float = 0.11
+    # How far each syllable's size is pulled towards the typical size of its shape
+    # (0 = as written in its template box, 1 = all the same).
+    evenness: float = 0.5
+
+MID_LINE = set("-=+~×÷±∓→←⇒⇐⇔·∙:<>≤≥≠≈∞()[]{}|")
+
+# Spacing measured in the writer's notes, in units of the Hangul height.
+LETTER_GAP = {"hangul": 0.09, "latin": 0.07}
+WORD_GAP = 0.5
 
 
 def _median(values, default):
@@ -256,11 +268,26 @@ def _transform(mask, scale, angle, elastic, rng):
 @dataclass
 class Placed:
     mask: np.ndarray
-    pad: int
-    width: float      # px, advance width of the ink
-    drop: float       # px, how far the glyph bottom sits below the baseline
+    left: int         # px, first ink column in ``mask``
+    bottom: int       # px, last ink row in ``mask``
+    width: float      # px, width of the ink (advance before the gap)
+    drop: float       # px, how far the ink bottom sits below the baseline
     gap: float        # px, space after the glyph
-    opacity: float
+
+
+def _thicken(mask, radius):
+    """Widen strokes by ``radius`` px (fractional, anti-aliased)."""
+    if radius < 0.25:
+        return mask
+    pad = int(np.ceil(radius)) + 1
+    m = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    dist = cv2.distanceTransform((m < 0.5).astype(np.uint8), cv2.DIST_L2, 3)
+    return np.maximum(m, np.clip(radius + 0.5 - dist, 0, 1))[pad:-pad, pad:-pad]
+
+
+def _crisp(mask):
+    """Firm up anti-aliased edges so the ink reads as solid pen strokes."""
+    return np.clip((mask - 0.12) / 0.6, 0, 1)
 
 
 class Renderer:
@@ -273,27 +300,46 @@ class Renderer:
         self.scale = {"hangul": self.hangul_h / profile.hangul_h,
                       "latin": self.hangul_h * 0.86 / profile.cap_h}
         if opts.ink == "auto" and profile.ink:
-            ink = np.clip(np.array(profile.ink), 0, 1) ** 1.5  # photos wash colours out; deepen them
-            if ink.max() > 0.5:
-                ink *= 0.5 / ink.max()
-            self.ink = tuple(float(v) for v in ink)
+            # The measured colour is lightened by anti-aliasing and the scan; keep its hue but
+            # make it as deep as a pen stroke really is.
+            ink = np.clip(np.array(profile.ink), 0, 1)
+            self.ink = tuple(float(v) for v in ink * (0.13 / max(float(ink.max()), 0.13)))
         else:
             self.ink = INK_COLORS.get(opts.ink, INK_COLORS["black"])
+        self.target_stroke = opts.stroke * self.hangul_h * self.r  # px
 
     def place(self, ch):
         o, mess, rng = self.o, self.o.messiness, self.rng
         glyph, category = self.factory.get(ch)
-        bottom_ref = self.p.hangul_bottom if category == "hangul" else self.p.latin_bottom
-        s_mm = self.scale[category] * (1 + rng.normal(0, 0.035 * mess))
-        mask, pad = _transform(glyph.mask, s_mm * self.r / PX, rng.normal(0, 1.8 * mess),
-                               0.018 * mess, rng)
-        gap_mm = (0.11 if category == "hangul" else 0.05) * self.hangul_h * o.letter_spacing
-        gap_mm += rng.normal(0, 0.12 * mess)
-        return Placed(mask, pad, glyph.w * s_mm * self.r, (glyph.top + glyph.h - bottom_ref) * s_mm * self.r,
-                      max(gap_mm, -0.2) * self.r, float(rng.uniform(0.86, 1.0)))
+        s_mm = self.scale[category] * (1 + rng.normal(0, 0.02 * mess))
+        ink_h = glyph.h - 4 / PX  # the glyph image carries a 2 px margin
+        if category == "hangul" and charsets.is_syllable(ch) and o.evenness > 0:
+            typical = self.factory._shape_size(ch)
+            if typical and ink_h > 0:
+                s_mm *= float(np.clip((typical[1] / ink_h) ** o.evenness, 0.8, 1.25))
+        scale = s_mm * self.r / PX
+        mask, _ = _transform(glyph.mask, scale, rng.normal(0, 0.8 * mess), 0.006 * mess, rng)
+        if o.stroke > 0:
+            mask = _thicken(mask, (self.target_stroke - self.p.stroke * scale) / 2)
+        mask = _crisp(mask)
+        cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
+        rows = np.nonzero(mask.max(axis=1) > 0.2)[0]
+        if len(cols) == 0:
+            cols = rows = np.array([0])
+        if category == "hangul":
+            drop = 0.0  # Hangul sits on the line; where it sat in its template box is irrelevant
+        elif ch in MID_LINE:
+            # Dashes, operators and brackets are centred on the writing, however they were
+            # placed in their template box.
+            drop = -(0.42 * self.hangul_h * self.r - (rows[-1] - rows[0] + 1) / 2)
+        else:
+            drop = (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s_mm * self.r
+        gap = LETTER_GAP[category] * self.hangul_h * o.letter_spacing + rng.normal(0, 0.03 * mess) * self.hangul_h
+        return Placed(mask, int(cols[0]), int(rows[-1]), float(cols[-1] - cols[0] + 1), drop,
+                      max(gap, 0.0) * self.r)
 
     def space(self):
-        return self.hangul_h * 0.42 * self.o.word_spacing * self.r * (1 + self.rng.normal(0, 0.12 * self.o.messiness))
+        return WORD_GAP * self.hangul_h * self.o.word_spacing * self.r * (1 + self.rng.normal(0, 0.08 * self.o.messiness))
 
     def render(self, text, max_pages=40):
         o, r = self.o, self.r
@@ -341,23 +387,17 @@ class Renderer:
         return pages
 
     def _draw_line(self, page, line, rule_y, left):
-        o, rng, r, mess = self.o, self.rng, self.r, self.o.messiness
-        slope = np.tan(np.radians(rng.normal(0, 0.35 * mess)))
-        wave_amp, wave_len, phase = rng.uniform(0, 0.35 * mess) * r, rng.uniform(60, 140) * r, rng.uniform(0, 6.3)
+        rng, r, mess = self.rng, self.r, self.o.messiness
         baseline = rule_y - 0.7 * r  # writing sits just above the ruled line
-        x = left + rng.normal(0, 0.6 * mess) * r
+        x = left
         ink = np.array(self.ink, np.float32)
+        jitter = 0.03 * self.hangul_h * r * mess
         for g in line:
             if g is None:
                 x += self.space()
                 continue
-            dx = x - left
-            y_bottom = (baseline + g.drop + dx * slope + wave_amp * np.sin(dx / wave_len * 6.283 + phase)
-                        + rng.normal(0, 0.25 * mess) * r)
-            mh, mw = g.mask.shape
-            x0 = int(round(x + rng.normal(0, 0.15 * mess) * r)) - g.pad
-            y0 = int(round(y_bottom)) - (mh - 2 * g.pad) - g.pad
-            _composite(page, g.mask * g.opacity, x0, y0, ink)
+            y_bottom = baseline + g.drop + rng.normal(0, jitter)
+            _composite(page, g.mask, int(round(x)) - g.left, int(round(y_bottom)) - g.bottom, ink)
             x += g.width + g.gap
 
 
@@ -380,7 +420,7 @@ def pages_to_pdf(pages):
     doc = pymupdf.open()
     for image in pages:
         buf = io.BytesIO()
-        image.save(buf, "JPEG", quality=80)
+        image.save(buf, "JPEG", quality=92)
         page = doc.new_page(width=595.28, height=841.89)
         page.insert_image(page.rect, stream=buf.getvalue())
     data = doc.tobytes(garbage=3, deflate=True)

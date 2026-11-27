@@ -54,10 +54,12 @@ def tight(mask, threshold=0.05):
     return mask[ys.min():ys.max() + 1, xs.min():xs.max() + 1], ys.min(), xs.min()
 
 
-def _paste_fit(canvas, mask, box, stretch=1.25, valign="center"):
+def _paste_fit(canvas, mask, box, stretch=1.25, valign="center", widen=1.0):
     """Scale ``mask`` into ``box`` (unit coords of ``canvas``) and composite it (max).
 
-    ``valign="bottom"`` rests it on the box floor (a vowel under the initial, like ㅡ)."""
+    ``valign`` "top"/"bottom" pushes it against that side of the box.  ``widen`` lets a narrow
+    shape be stretched sideways (a ㅋ written tall on its own sits wide above ㅡ in 크).
+    Returns the canvas row just below the pasted shape."""
     mask, _, _ = tight(mask)
     H, W = canvas.shape
     x0, y0, x1, y1 = box[0] * W, box[1] * H, box[2] * W, box[3] * H
@@ -66,15 +68,21 @@ def _paste_fit(canvas, mask, box, stretch=1.25, valign="center"):
     sx, sy = bw / w, bh / h
     s = min(sx, sy)
     # Stretch only along a glyph's long axis: widening a thin stroke like ㅣ just makes it bold.
-    sx = min(sx, s * stretch) if w >= 0.6 * h else s
+    sx = min(sx, s * stretch) if w >= 0.6 * h else min(sx, s * widen)
     sy = min(sy, s * stretch) if h >= 0.6 * w else s
     nw, nh = max(1, int(round(w * sx))), max(1, int(round(h * sy)))
     scaled = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
     left = int(round(x0 + (bw - nw) / 2))
-    top = int(round(y1 - nh)) if valign == "bottom" else int(round(y0 + (bh - nh) / 2))
+    if valign == "bottom":
+        top = int(round(y1 - nh))
+    elif valign == "top":
+        top = int(round(y0))
+    else:
+        top = int(round(y0 + (bh - nh) / 2))
     left, top = max(0, min(left, W - nw)), max(0, min(top, H - nh))
     region = canvas[top:top + nh, left:left + nw]
     np.maximum(region, scaled[:region.shape[0], :region.shape[1]], out=region)
+    return top + region.shape[0]
 
 
 def side_by_side(masks, gap_ratio):
@@ -404,6 +412,8 @@ class Composer:
         if any(v is None for v in found.values()):
             return None
         boxes = role_boxes(vclass, has_final)
+        under = vclass == "bottom"
+        initial_end = None  # canvas row below the initial, for stacking ㅡ ㅗ ㅜ right under it
         for role, item in found.items():
             if isinstance(item[0], str):  # mixed vowel built from two parts
                 _paste_fit(canvas, item[1], boxes["V"][0], stretch=1.6)
@@ -411,14 +421,19 @@ class Composer:
                 continue
             mask, unit = item
             if unit is not None:
-                _paste_exact(canvas, mask, unit)
+                end = _paste_exact(canvas, mask, unit)
             elif role == "V" and vclass == "mixed":
                 union = (min(b[0] for b in boxes["V"]), 0.0, 1.0, max(b[3] for b in boxes["V"]))
-                _paste_fit(canvas, mask, union, stretch=1.3)
+                end = _paste_fit(canvas, mask, union, stretch=1.3)
+            elif role == "V" and under and initial_end is not None:
+                box = boxes["V"][0]
+                top = min(initial_end / canvas.shape[0] + 0.06, box[3] - 0.25)
+                end = _paste_fit(canvas, mask, (box[0], top, box[2], box[3]), stretch=1.6, valign="top")
             else:
-                floor = role == "V" and vclass == "bottom" and not has_final
-                _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25,
-                           valign="bottom" if floor else "center")
+                end = _paste_fit(canvas, mask, boxes[role][0], stretch=1.6 if role == "V" else 1.25,
+                                 widen=1.5 if (role == "I" and under) else 1.0)
+            if role == "I":
+                initial_end = end
         return canvas
 
 
@@ -430,4 +445,6 @@ def _paste_exact(canvas, mask, unit):
     scaled = cv2.resize(mask, (w, h), interpolation=cv2.INTER_AREA if w < mask.shape[1] else cv2.INTER_LINEAR)
     x0, y0 = min(max(0, x0), W - w), min(max(0, y0), H - h)
     region = canvas[y0:y0 + h, x0:x0 + w]
+    end = y0 + region.shape[0]
     np.maximum(region, scaled[:region.shape[0], :region.shape[1]], out=region)
+    return end
