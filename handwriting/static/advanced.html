@@ -3,76 +3,162 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>손글씨 노트 변환기 · 고급</title>
+<title>손글씨 노트 · 고급</title>
 <style>
-  body { font-family: system-ui, "Malgun Gothic", sans-serif; max-width: 920px; margin: 0 auto; padding: 16px; line-height: 1.5; }
-  section { border: 1px solid #ccc; border-radius: 6px; padding: 12px 16px; margin: 16px 0; }
-  h2 { margin: 0 0 8px; font-size: 1.15em; }
-  textarea { width: 100%; box-sizing: border-box; min-height: 140px; font: inherit; }
-  label { display: inline-block; margin: 2px 12px 2px 0; }
-  .row { margin: 8px 0; }
-  .msg { white-space: pre-wrap; margin-top: 8px; }
-  .err { color: #b00020; }
-  .muted { color: #666; font-size: .92em; }
-  img.page { width: 100%; border: 1px solid #ddd; margin: 8px 0; }
-  img.sheet { max-width: 100%; border: 1px solid #ddd; }
-  button { padding: 6px 14px; }
-  input[type=range] { vertical-align: middle; }
+  :root {
+    --paper: #fbf9ed; --line: #e0dfd5; --ink: #22222a; --muted: #6b6a63; --accent: #2f5d8a;
+    --accent-soft: #e6eef6; --card: #ffffff; --border: #dcdad0; --error: #a8261b; --ok: #2e6b3a;
+    --tip: #fff8e1; --tip-border: #ecd9a0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; color: var(--ink); background: var(--paper);
+    background-image: linear-gradient(var(--line) 1px, transparent 1px),
+                      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 24px 24px;
+    font: 15px/1.55 system-ui, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+  main { max-width: 900px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.5px; }
+  h1 small { color: var(--muted); font-weight: 500; font-size: 18px; }
+  .lead { color: var(--muted); margin: 0 0 6px; }
+  nav { margin: 0 0 18px; font-size: 14px; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px;
+          margin: 14px 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+  .card > h2 { font-size: 17px; margin: 0 0 12px; display: flex; align-items: center; gap: 10px; }
+  .step { display: inline-flex; width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: #fff;
+          font-size: 14px; align-items: center; justify-content: center; flex: none; }
+  .muted { color: var(--muted); font-size: 13.5px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 10px 0; }
+  .row.stack { display: block; }
+  label { display: inline-flex; align-items: center; gap: 6px; }
+  button, .button {
+    font: inherit; border: 1px solid var(--border); background: #f6f5ef; color: var(--ink);
+    border-radius: 7px; padding: 7px 14px; cursor: pointer; text-decoration: none; display: inline-block;
+  }
+  button:hover, .button:hover { background: #efede4; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  button.primary:hover { background: #274f76; }
+  input[type=file] { font: inherit; font-size: 13.5px; color: var(--muted); max-width: 100%; }
+  input[type=file]::file-selector-button {
+    font: inherit; font-size: 14px; border: 1px solid var(--border); background: #f6f5ef; color: var(--ink);
+    border-radius: 7px; padding: 6px 12px; margin-right: 10px; cursor: pointer;
+  }
+  input[type=text], input:not([type]) { font: inherit; padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; }
+  select { font: inherit; padding: 5px 8px; border-radius: 7px; border: 1px solid var(--border); background: #fff; max-width: 100%; }
+  textarea { width: 100%; min-height: 120px; font: inherit; padding: 10px; border: 1px solid var(--border);
+             border-radius: 7px; resize: vertical; }
+  .msg { white-space: pre-wrap; margin-top: 10px; }
+  .msg:empty { display: none; }
+  .err { color: var(--error); }
+  .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .mode { border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px; cursor: pointer; display: block; }
+  .mode:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .mode b { font-size: 15px; }
+  .mode span { display: block; color: var(--muted); font-size: 13.5px; margin-top: 2px; }
+  .tip { background: var(--tip); border: 1px solid var(--tip-border); border-radius: 9px; padding: 12px 14px; margin: 12px 0; }
+  .tip b { display: block; margin-bottom: 4px; }
+  .tip ol { margin: 6px 0 0; padding-left: 20px; }
+  .tip li { margin: 2px 0; }
+  .sub { border-top: 1px dashed var(--border); margin-top: 14px; padding-top: 12px; }
+  details { border: 1px solid var(--border); border-radius: 9px; padding: 10px 14px; margin: 12px 0; background: #fdfdfb; }
+  summary { cursor: pointer; font-weight: 600; }
+  img.page { width: 100%; border: 1px solid var(--border); border-radius: 6px; margin: 8px 0; background: #fff; }
+  img.sheet { max-width: 100%; border: 1px solid var(--border); border-radius: 6px; }
+  input[type=range] { vertical-align: middle; accent-color: var(--accent); }
+  .sliders label { min-width: 250px; }
+  @media (max-width: 600px) { .modes { grid-template-columns: 1fr; } .card { padding: 14px; } }
 </style>
 </head>
 <body>
-<h1>손글씨 노트 변환기 <small class="muted">고급</small></h1>
-<p><a href="/">← 손글씨 노트 첫 화면</a> · <a href="/quick">한 번에 변환 (글씨체 파일을 매번 올리는 방식)</a></p>
-<p class="muted">① 템플릿을 인쇄해 내 글씨로 채우고 → ② 사진/스캔을 올려 글씨체를 학습시킨 뒤 → ③ 글이나 PDF를 넣으면 내 글씨로 쓴 노트 PDF를 만들어 줍니다.</p>
+<main>
+<h1>손글씨 노트 <small>고급</small></h1>
+<p class="lead">① 템플릿을 인쇄해 내 글씨로 채우고 → ② 사진·스캔을 올려 글씨체를 학습시키고 → ③ 글이나 PDF를 내 글씨로 씁니다.</p>
+<nav><a href="/">← 첫 화면</a> · <a href="/quick">한 번에 변환 (글씨체 사진을 매번 올리는 방식)</a></nav>
 
-<section>
-  <h2>① 글씨체 템플릿 만들기</h2>
+<section class="card">
+  <h2><span class="step">1</span>글씨체 템플릿 만들기</h2>
+  <div class="modes">
+    <label class="mode"><span style="display:flex;gap:8px;align-items:center;margin:0;color:inherit;font-size:inherit">
+      <input type="radio" name="tplMode" value="simple" checked> <b>간단하게</b></span>
+      <span>1~3쪽만 쓰면, 쓰지 않은 한글은 내 글씨의 자모로 조합합니다</span></label>
+    <label class="mode"><span style="display:flex;gap:8px;align-items:center;margin:0;color:inherit;font-size:inherit">
+      <input type="radio" name="tplMode" value="full"> <b>자세히</b></span>
+      <span>고른 글자를 하나도 빠짐없이 직접 씁니다</span></label>
+  </div>
+  <div class="tip">
+    <b>많이 쓸수록 정확해집니다</b>
+    직접 쓴 글자는 그 모양 그대로 쓰고, 쓰지 않은 한글은 내가 쓴 다른 글자에서 자모(ㄱ·ㅏ·ㄴ…)를 떼어
+    조합합니다. 조합한 글자는 직접 쓴 글자보다 덜 자연스럽고, 같은 글자를 여러 번 써 두면 쓸 때마다 조금씩 다른
+    모양이 나옵니다. 그래서 많이 쓸수록 내 글씨와 더 닮습니다.
+    <ol>
+      <li><b style="display:inline">간단 1쪽</b> — 가장 빨리 시작 (조합한 글자가 많음)</li>
+      <li><b style="display:inline">간단 2~3쪽</b> — 추천: 문서 글자의 대부분을 직접 쓴 글씨로</li>
+      <li><b style="display:inline">자세히</b> — 문서에 나오는 모든 글자를 직접 쓴 글씨로</li>
+      <li><b style="display:inline">+ <a href="/api/template/100003.pdf" target="_blank">필사 시트</a></b> — 문장 속에서 쓴 글씨라 실제 노트와 가장 닮습니다 (다 쓰고 ②에서 올리면 됩니다)</li>
+    </ol>
+    나중에 언제든 ②의 <b style="display:inline">현재 글씨체에 글자 추가</b>로 더 써서 넣을 수 있습니다.
+  </div>
+  <div class="row" id="simpleBox">
+    <label>분량 <select id="simplePages">
+      <option value="1">1쪽 (110칸)</option><option value="2" selected>2쪽 (220칸)</option><option value="3">3쪽 (330칸)</option>
+    </select></label>
+    <div class="muted" id="simpleHint" style="flex-basis:100%">아래에서 변환할 PDF를 고르면 그 PDF에 맞춰 글자를 고르고, 분량마다 직접 쓴 글씨로 쓰는 비율을 보여 줍니다. 고르지 않으면 일상적인 한글에 맞춥니다.</div>
+  </div>
   <div id="sets" class="row"></div>
-  <div class="row">
-    <div><b>변환할 PDF를 올리면</b> 그 안에 나오는 글자를 모두 찾아(수식 기호 포함) 아래 칸에 넣습니다.
-      많이 나오는 글자부터 적힙니다.</div>
-    <input type="file" id="tplDoc" accept=".pdf,.txt,.md,application/pdf,text/plain">
-    <span id="tplDocMsg" class="muted"></span>
-  </div>
-  <div class="row">
-    <div>또는 변환할 글을 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다:</div>
-    <textarea id="tplText" placeholder="(선택) 변환할 글을 붙여 넣거나, 위에서 PDF를 고르세요"></textarea>
-  </div>
-  <div class="row">
-    <label><input type="checkbox" id="noHanja" checked> 한자 빼기</label>
-    <label><input type="checkbox" id="frequent" checked> 자주 나오는 글자는 2~3번 쓰기 (PDF에서 가져올 때)</label>
-    <label><input type="checkbox" id="skipKnown"> 이미 내 글씨체에 있는 글자 빼기</label>
-  </div>
-  <div class="row">
-    <label>글자마다 <select id="repeat"><option value="1">1번</option><option value="2">2번 (더 자연스러움)</option></select> 쓰기</label>
-    <button id="tplBtn">템플릿 PDF 만들기</button>
+  <div class="sub">
+    <div class="row stack">
+      <div><b>변환할 PDF를 올리면</b> 그 안에 나오는 글자를 모두 찾습니다 (수식 기호 포함, 많이 나오는 글자부터).</div>
+      <div class="row"><input type="file" id="tplDoc" accept=".pdf,.txt,.md,application/pdf,text/plain">
+        <span id="tplDocMsg" class="muted"></span></div>
+    </div>
+    <div class="row stack">
+      <div id="textLabel">또는 변환할 글을 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다:</div>
+      <textarea id="tplText" placeholder="(선택) 변환할 글을 붙여 넣거나, 위에서 PDF를 고르세요"></textarea>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="noHanja" checked> 한자 빼기</label>
+      <label id="frequentBox"><input type="checkbox" id="frequent" checked> 자주 나오는 글자는 2~3번 쓰기 (PDF에서 가져올 때)</label>
+      <label><input type="checkbox" id="skipKnown"> 이미 내 글씨체에 있는 글자 빼기</label>
+    </div>
+    <div class="row">
+      <label id="repeatBox">글자마다 <select id="repeat"><option value="1">1번</option><option value="2">2번 (더 자연스러움)</option></select> 쓰기</label>
+      <button id="tplBtn" class="primary">템플릿 PDF 만들기</button>
+    </div>
   </div>
   <div id="tplMsg" class="msg"></div>
 </section>
 
-<section>
-  <h2>② 작성한 템플릿 올리기 (글씨체 학습)</h2>
+<section class="card">
+  <h2><span class="step">2</span>작성한 템플릿 올리기 (글씨체 학습)</h2>
   <div class="row"><input type="file" id="tplFiles" multiple accept="image/*,.pdf"></div>
-  <div class="row muted">사진(JPG·PNG)이나 스캔 PDF. 여러 쪽이면 한 번에 모두 고르세요. 네 모서리의 검은 표식이 모두 보여야 합니다.
+  <div class="muted">사진(JPG·PNG)이나 스캔·아이패드에서 내보낸 PDF. 여러 쪽이면 한 번에 모두 고르세요. 네 모서리의 검은 표식이 모두 보여야 합니다.
     템플릿이 아니라 자유롭게 쓴 손글씨라면 아래에 사진 속 글을 그대로 입력하세요.</div>
-  <textarea id="transcript" placeholder="(자유롭게 쓴 손글씨일 때만) 사진에 적힌 내용"></textarea>
+  <div class="row stack"><textarea id="transcript" placeholder="(자유롭게 쓴 손글씨일 때만) 사진에 적힌 내용"></textarea></div>
   <div class="row">
-    <label>템플릿 ID (페이지 코드 인식 실패 시만) <input id="tplHint" size="10"></label>
+    <label>템플릿 ID <input id="tplHint" size="10" placeholder="인식 실패 시만"></label>
     <label><input type="checkbox" id="extend"> 현재 글씨체에 글자 추가</label>
-    <button id="profBtn">업로드하고 학습</button>
+    <button id="profBtn" class="primary">업로드하고 학습</button>
   </div>
   <div id="profMsg" class="msg"></div>
-  <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button>
-    <button id="useProf">이 글씨체를 앱의 '내 글씨체'로 쓰기</button> <span id="useMsg" class="muted"></span></div>
-  <div id="sheetBox"></div>
-  <details class="row" id="pickBox">
+  <div class="sub">
+    <div class="row">
+      <label>현재 글씨체 ID <input id="profileId" size="12"></label>
+      <button id="loadProf">불러오기</button>
+      <button id="useProf">이 글씨체를 앱의 '내 글씨체'로 쓰기</button>
+      <span id="useMsg" class="muted"></span>
+    </div>
+    <div id="sheetBox"></div>
+  </div>
+  <details id="pickBox">
     <summary>쓸 글자 고르기 (잘못 써진 글자 빼기)</summary>
     <p class="muted">글자를 누르면 흐려지고 더 이상 쓰이지 않습니다. 다시 누르면 되살아납니다.
       같은 글자를 여러 번 썼다면 마음에 안 드는 것만 빼세요.</p>
     <div class="row"><input id="pickFilter" placeholder="글자로 찾기 (예: m i 으)" size="24"></div>
     <div id="pickGrid"></div>
   </details>
-  <details class="row">
+  <details>
     <summary>내 문장 샘플로 보정하기 (선택)</summary>
     <p class="muted">평소처럼 문장 몇 줄을 쓴 사진과 그 내용을 올리면, 글자마다 크기·폭을 실제 필기에 맞춰 보정합니다.
       템플릿 칸에는 크고 또박또박 쓰지만 실제 문장에서는 다르게 쓰는 글자(예: 으, 의)가 맞춰집니다.</p>
@@ -83,8 +169,9 @@
   </details>
 </section>
 
-<section>
-  <h2>③ 손글씨로 바꿀 글</h2>
+<section class="card">
+  <h2><span class="step">3</span>손글씨로 바꿀 글 (세부 설정)</h2>
+  <p class="muted" style="margin-top:0">PDF를 원래 배치 그대로 바꾸려면 <a href="/">첫 화면</a>을 쓰세요. 여기서는 글을 노트 줄에 이어 쓰면서 종이·펜·간격을 직접 고릅니다.</p>
   <div class="row">
     <input type="file" id="docFile" accept=".pdf,.txt,.md,text/plain,application/pdf">
     <label><input type="checkbox" id="keepLines"> PDF 줄바꿈 그대로 유지</label>
@@ -96,19 +183,18 @@
     <label>펜 색 <select id="ink"><option value="auto">내 펜 색(자동)</option><option value="black">검정</option><option value="blue">파랑</option><option value="red">빨강</option><option value="pencil">연필</option></select></label>
     <label><input type="checkbox" id="margin" checked> 왼쪽 여백선</label>
   </div>
-  <div class="row">
+  <div class="row sliders">
     <label>줄 간격 <input type="range" id="line_pitch" min="6" max="12" step="0.5" value="8"> <span></span>mm</label>
     <label>글자 크기 <input type="range" id="size" min="0.35" max="0.9" step="0.05" value="0.6"> <span></span></label>
-  </div>
-  <div class="row">
     <label>자간 <input type="range" id="letter_spacing" min="0" max="3" step="0.1" value="1"> <span></span></label>
     <label>띄어쓰기 <input type="range" id="word_spacing" min="0.3" max="3" step="0.1" value="1"> <span></span></label>
     <label>자연스러운 흔들림 <input type="range" id="messiness" min="0" max="1" step="0.05" value="0.5"> <span></span></label>
   </div>
-  <button id="renderBtn">손글씨 노트 만들기</button>
+  <div class="row"><button id="renderBtn" class="primary">손글씨 노트 만들기</button></div>
   <div id="renderMsg" class="msg"></div>
   <div id="pages"></div>
 </section>
+</main>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -138,7 +224,31 @@ call("/api/charsets").then((sets) => {
   ).join("");
 });
 
-let docExtra = "";  // more copies of the frequent characters of the chosen PDF
+let docExtra = "";      // more copies of the frequent characters of the chosen PDF
+let docCounts = null;   // how often each character is used in it
+let docPreview = null;  // what a short template of 1-3 pages would give
+
+const mode = () => document.querySelector("input[name=tplMode]:checked").value;
+const pct = (x) => `${Math.round(100 * x)}%`;
+function showMode() {
+  const simple = mode() === "simple";
+  $("simpleBox").style.display = simple ? "" : "none";
+  $("sets").style.display = simple ? "none" : "";
+  $("frequentBox").style.display = simple ? "none" : "";
+  $("repeatBox").style.display = simple ? "none" : "";
+  $("textLabel").innerHTML = simple
+    ? "또는 변환할 글을 붙여 넣으면 그 글에 맞춰 고릅니다:"
+    : "또는 변환할 글을 붙여 넣으면 그 글에 나오는 <b>모든 글자</b>를 템플릿에 넣습니다:";
+  if (docPreview) {
+    for (const o of $("simplePages").options) {
+      const p = docPreview[o.value];
+      o.textContent = `${o.value}쪽 (${o.value * 110}칸) — 직접 쓴 글씨 ${pct(p.direct)}, 자모 조합 ${pct(p.composed)}` +
+        (p.font >= 0.005 ? `, 기본 글꼴 ${pct(p.font)}` : "");
+    }
+  }
+}
+document.querySelectorAll("input[name=tplMode]").forEach((r) => r.onchange = showMode);
+showMode();
 
 async function scanDocument() {
   const file = $("tplDoc").files[0];
@@ -153,12 +263,15 @@ async function scanDocument() {
     const r = await call("/api/template/scan", { method: "POST", body: form });
     $("tplText").value = r.chars;
     docExtra = r.extra;
+    docCounts = r.counts;
+    docPreview = r.simple;
+    showMode();
     const notes = [];
     if (r.hanja) notes.push(r.hanja_removed ? `한자 ${r.hanja}자 뺌` : `한자 ${r.hanja}자 포함`);
     if (r.known) notes.push(`이미 있는 글자 ${r.known}자 뺌`);
     $("tplDocMsg").textContent = `${r.pages ? r.pages + "쪽에서 " : ""}글자 ${r.unique}종을 찾았습니다` +
-      (notes.length ? ` (${notes.join(", ")})` : "") +
-      `. 위의 글자 묶음 체크를 모두 풀면 이 PDF에 나오는 글자만 넣습니다.`;
+      (notes.length ? ` (${notes.join(", ")})` : "") + "." +
+      (mode() === "full" ? " 위의 글자 묶음 체크를 모두 풀면 이 PDF에 나오는 글자만 넣습니다." : "");
   } catch (e) { $("tplDocMsg").textContent = e.message; }
 }
 $("tplDoc").onchange = scanDocument;
@@ -169,17 +282,23 @@ $("tplBtn").onclick = async () => {
   const sets = [...document.querySelectorAll("#sets input:checked")].map((i) => i.value);
   show($("tplMsg"), "만드는 중…");
   try {
+    const common = { exclude_hanja: $("noHanja").checked, skip_known: $("skipKnown").checked,
+                     profile_id: $("profileId").value.trim() };
+    const body = mode() === "simple"
+      ? { ...common, simple: $("simplePages").value, counts: $("tplDoc").files[0] ? docCounts : null,
+          text: $("tplText").value }
+      : { ...common, sets, text: $("tplText").value, repeat: $("repeat").value,
+          extra: $("frequent").checked && $("tplDoc").files[0] ? docExtra : "" };
     const r = await call("/api/template", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sets, text: $("tplText").value, repeat: $("repeat").value,
-                             exclude_hanja: $("noHanja").checked, skip_known: $("skipKnown").checked,
-                             profile_id: $("profileId").value.trim(),
-                             extra: $("frequent").checked && $("tplDoc").files[0] ? docExtra : "" }),
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     });
+    const cov = r.coverage ? `<br>이 템플릿으로 쓰면 글자의 ${pct(r.coverage.direct)}는 직접 쓴 글씨, ` +
+      `${pct(r.coverage.composed)}는 내 글씨 자모의 조합` +
+      (r.coverage.font >= 0.005 ? `, ${pct(r.coverage.font)}는 기본 글꼴(템플릿에 없는 기호)` : "") + "로 씁니다." : "";
     $("tplMsg").className = "msg";
     $("tplMsg").innerHTML = `템플릿 ID <b>${r.id}</b> · ${r.cells}칸 · ${r.pages}쪽 → ` +
       `<a href="${r.pdf}" target="_blank">PDF 열기/인쇄</a><br>` +
-      `<span class="muted">A4에 '실제 크기(100%)'로 인쇄하세요. 다 쓰면 ②에서 사진이나 스캔을 올리면 됩니다.</span>`;
+      `<span class="muted">A4에 '실제 크기(100%)'로 인쇄하세요. 다 쓰면 ②에서 사진이나 스캔을 올리면 됩니다.</span>` + cov;
   } catch (e) { show($("tplMsg"), e.message, true); }
 };
 

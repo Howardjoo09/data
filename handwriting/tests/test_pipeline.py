@@ -281,6 +281,28 @@ class PipelineTests(unittest.TestCase):
         info = T.load_template(self.data, r["id"])
         self.assertEqual("".join(info["pages"][0]), "가나가가")  # extra copies only of listed characters
 
+    def test_short_template_covers_every_jamo(self):
+        from collections import Counter
+        from hwnote import simple
+        text = ("합성함수의 미분법에 의하여 양변을 미분하면 된다. 수열의 극한값이 존재하고 연속함수이므로 등식이 성립한다. "
+                "닫힌구간에서 최댓값과 최솟값을 갖는다. 그래프의 꼴을 판단한다. x + y = 1, sin x")
+        counts = Counter(c for c in text if not c.isspace())
+        chars = simple.choose(counts, 110)
+        self.assertLessEqual(len(chars), 110)
+        self.assertTrue(set(simple.BASIC_JAMO) <= set(chars))   # the composer's fallback
+        needed = set().union(*(simple.features(c) for c in counts if charsets.is_syllable(c)))
+        shown = set().union(*(simple.features(c) for c in chars if charsets.is_syllable(c)))
+        self.assertTrue(needed <= shown)
+        self.assertIn("x", chars)                                  # no stand-in for Latin letters
+        cov = simple.coverage(counts, chars)
+        self.assertAlmostEqual(cov["direct"] + cov["composed"] + cov["font"], 1.0)
+        self.assertEqual(len(simple.choose(Counter(), 110)), 110)  # ordinary Korean, no document
+        import server
+        server.DATA = self.data
+        r = server.app.test_client().post("/api/template", json={"simple": 1, "text": text}).json
+        self.assertEqual(r["cells"], 110)
+        self.assertGreater(r["coverage"]["direct"], 0.9)
+
     def test_page_ranges(self):
         import server
         self.assertEqual(server.parse_pages("", 3), [0, 1, 2])

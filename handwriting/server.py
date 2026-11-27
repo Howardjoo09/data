@@ -18,7 +18,7 @@ import zipfile
 import pymupdf
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
-from hwnote import charsets, extract, pageworker, pdfnotes, render, style, template as T, textio
+from hwnote import charsets, extract, pageworker, pdfnotes, render, simple, style, template as T, textio
 
 # Inside the packaged app the program files are unpacked to a temporary folder.
 BASE = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
@@ -152,23 +152,47 @@ def scan_document_for_template():
         known = set(_known_characters(request.form.get("profile_id", ""))) & set(counts)
         for c in known:
             del counts[c]
+    known_all = _known_characters(request.form.get("profile_id", "")) if request.form.get("skip_known") == "1" else ""
+    preview = {}
+    for n in (1, 2, 3):  # what a short template of n pages would give
+        chosen = simple.choose(counts, n * T.CELLS_PER_PAGE, known_all)
+        preview[n] = {k: round(v, 3) for k, v in simple.coverage(counts, chosen, known_all).items()}
     ordered = [c for c, _ in counts.most_common()]
     # Further copies go round the list (x n ) ( ... then x n ...), never two of a kind in a row:
     # a character written twice in succession comes out the same twice.
     extra = "".join(c for c, n in counts.most_common() if n >= 20) + \
         "".join(c for c, n in counts.most_common() if n >= 60)
     return jsonify({"chars": "".join(ordered), "extra": extra, "unique": len(ordered), "pages": pages,
+                    "counts": dict(counts), "simple": preview,
                     "hanja": len(hanja), "hanja_removed": request.form.get("exclude_hanja") == "1",
                     "known": len(known), "uses": sum(counts.values())})
 
 
 @app.post("/api/template")
 def make_template():
+    """A template from character sets and text (every character), or a short one ("simple":
+    1-3 pages) for a document given as character counts or text (see hwnote/simple.py)."""
+    from collections import Counter
     body = request.get_json(force=True, silent=True) or {}
     skip = _known_characters(str(body.get("profile_id", ""))) if body.get("skip_known") else ""
-    chars = charsets.build_charlist(body.get("sets", []), body.get("text", "")[:MAX_TEXT], body.get("repeat", 1),
-                                    exclude_hanja=bool(body.get("exclude_hanja")),
-                                    extra=str(body.get("extra", ""))[:MAX_TEXT], skip=skip)
+    coverage = None
+    if body.get("simple"):
+        pages = int(body.get("simple")) if str(body.get("simple")).isdigit() else 1
+        pages = min(3, max(1, pages))
+        raw = body.get("counts") or {}
+        if raw:
+            counts = Counter({str(c)[:1]: int(n) for c, n in raw.items() if str(c) and int(n) > 0})
+        else:
+            counts = Counter(c for c in charsets.normalize_text(body.get("text", "")[:MAX_TEXT])
+                             if not c.isspace() and c.isprintable())
+        if body.get("exclude_hanja"):
+            counts = Counter({c: n for c, n in counts.items() if not charsets.is_hanja(c)})
+        chars = simple.choose(counts, pages * T.CELLS_PER_PAGE, skip)
+        coverage = {k: round(v, 3) for k, v in simple.coverage(counts, chars, skip).items()}
+    else:
+        chars = charsets.build_charlist(body.get("sets", []), body.get("text", "")[:MAX_TEXT], body.get("repeat", 1),
+                                        exclude_hanja=bool(body.get("exclude_hanja")),
+                                        extra=str(body.get("extra", ""))[:MAX_TEXT], skip=skip)
     if not chars:
         return _error("템플릿에 넣을 글자를 하나 이상 고르세요.")
     if len(chars) > T.CELLS_PER_PAGE * 20:
@@ -177,7 +201,7 @@ def make_template():
     with open(os.path.join(DATA, "templates", f"{info['id']}.pdf"), "wb") as f:
         f.write(T.build_pdf(info))
     return jsonify({"id": info["id"], "pages": len(info["pages"]), "cells": len(chars),
-                    "pdf": f"/api/template/{info['id']}.pdf"})
+                    "pdf": f"/api/template/{info['id']}.pdf", "coverage": coverage})
 
 
 @app.get("/api/template/<int:template_id>.pdf")
