@@ -145,8 +145,7 @@ class PageWriter:
         """Pen-drawn mask of a glyph at ``s`` px per profile-mm, with its ink box."""
         scale = s / PX
         if self.o.stroke > 0:
-            mask = pen_glyph(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect,
-                             min(self.pen, 0.15 * glyph.h * s))
+            mask = pen_glyph(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect, self.pen)
         else:
             mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
             mask = _crisp(mask)
@@ -516,11 +515,11 @@ class PageWriter:
                 y = _darkest_row(original, c.bbox[0] * k, y0, c.bbox[2] * k, y1)
                 if id(c) in self._bar_span:  # re-measured to the packed numerator/denominator
                     x0, x1 = (v * k for v in self._bar_span[id(c)])
-                self._hand_line(layer, x0 + 0.5, y, x1 - 0.5, y, self.pen * 0.9)
+                self._hand_line(layer, x0 + 0.5, y, x1 - 0.5, y, self.pen)
                 continue
             if c.ch == mathfont.OVERDOT:
                 cy = y0 + 0.2 * (y1 - y0)
-                cv2.circle(layer, (int((x0 + x1) / 2), int(cy)), max(1, int(self.pen * 0.6)), 1.0, -1, cv2.LINE_AA)
+                cv2.circle(layer, (int((x0 + x1) / 2), int(cy)), max(1, int(round(self.pen / 2))), 1.0, -1, cv2.LINE_AA)
                 continue
             cx = (x0 + x1) / 2
             glyph, s, _ = sym[id(c)]
@@ -543,7 +542,7 @@ class PageWriter:
 
         black = layer_for((0, 0, 0))
         for x0, y0, x1, y1, width in lines:
-            self._hand_line(black, x0 * k, y0 * k, x1 * k, y1 * k, max(self.pen * 0.75, width * k))
+            self._hand_line(black, x0 * k, y0 * k, x1 * k, y1 * k, self.pen)  # same pen for lines
 
         for rect in pictures:  # copied as printed, like a figure pasted into a notebook
             a, b, c2, d = (int(round(v * k)) for v in rect)

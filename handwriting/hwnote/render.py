@@ -142,8 +142,16 @@ def _with_margin(original, inner):
     return out
 
 
+# Lowercase letters are written a little larger than in the template boxes, so that they stand
+# up to the capitals and to Δ beside them (Δu, Δx); Δ itself is written about their size.
+CLASS_SCALE = {"short": 1.15, "desc": 1.15, "tall": 1.0, "cap": 1.0}
+DELTA_OVER_SHORT = 1.05
+
+
 def latin_class(ch):
-    if ch in charsets.UPPER or ch in charsets.DIGITS or ch in "ΔΣ":
+    if ch == "Δ":
+        return "delta"
+    if ch in charsets.UPPER or ch in charsets.DIGITS or ch == "Σ":
         return "cap"
     if ch in "acemnorsuvwxzαεθπσω":
         return "short"
@@ -201,12 +209,11 @@ class GlyphFactory:
 
     def latin_drop(self, ch, glyph, s):
         """How far (in the units of ``s``) the ink bottom of a Latin letter goes below the line:
-        letters without descenders rest exactly on it, so a line's letters share one bottom."""
+        letters rest exactly on it, so a line's letters share one bottom; only punctuation keeps
+        its own place (a comma hangs a little below)."""
         cls = latin_class(ch)
-        if cls in ("cap", "short", "tall"):
-            return 0.0
-        if cls == "desc":
-            return self.desc_depth * (glyph.h - 4 / PX) * s
+        if cls is not None:
+            return 0.0  # g p y too: every letter's lowest point is on the line
         return (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s
 
     def skeleton(self, glyph):
@@ -229,7 +236,11 @@ class GlyphFactory:
             size = self._shape_size(ch)
             return size[1] if size else None
         cls = latin_class(ch)
-        return self.latin_size.get(cls) if cls else None
+        if cls == "delta":
+            short = self.latin_size.get("short")
+            return short * CLASS_SCALE["short"] * DELTA_OVER_SHORT if short else None
+        size = self.latin_size.get(cls) if cls else None
+        return size * CLASS_SCALE.get(cls, 1.0) if size else None
 
     def _shape_size(self, ch):
         vclass, has_final = self.shape(ch)
@@ -423,69 +434,104 @@ def _thin(binary):
 
 
 def uniform_pen(mask, target):
-    """Redraw a rendered glyph with one round pen ``target`` px wide.
+    """Redraw a glyph as if written with a monoline pen ``target`` px wide.
 
-    The centre line is found at output size (thin strokes survive there) and its ends are
-    pushed back out along the stroke, because thinning eats into every stroke end by about
-    half the stroke width -- short strokes such as the hook of ㄷ would otherwise shrink to
-    nothing.  Every stroke of every letter then has exactly the same width."""
+    The centre line of every stroke is found (on an enlarged copy, so thin strokes keep their
+    shape), little spurs that thinning leaves at corners are pruned, each stroke end is pushed
+    back out to the tip of the original stroke (thinning eats into it by half the stroke
+    width), and the whole centre line is covered by one round pen.  Thick and thin parts of the
+    original writing therefore all come out exactly as wide as the pen."""
     binary = (mask > 0.35).astype(np.uint8)
     if binary.sum() < 3:
         return mask
+    width = stroke_width(binary.astype(np.float32))
+    f = int(np.clip(np.ceil(7.0 / max(width, 1.0)), 1, 4))
     pad = int(np.ceil(target)) + 3
-    binary = cv2.copyMakeBorder(binary, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    big = cv2.copyMakeBorder(mask.astype(np.float32), pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    if f > 1:
+        big = cv2.resize(big, None, fx=f, fy=f, interpolation=cv2.INTER_CUBIC)
+    big = cv2.GaussianBlur(big, (0, 0), 0.6 * f)
+    binary = (big > 0.35).astype(np.uint8)
     centre = _thin(binary)
-    radius = max(0.5, (target - 1) / 2)
+    radius = max(0.5, (target - 1) / 2) * f
+    # Thinning leaves spurs about half a stroke width long at corners; real short strokes
+    # (the arm of a y, the tick of a ㅏ) are longer and must stay.
+    _prune_spurs(centre, max(2, int(0.6 * width * f)))
+    _extend_ends(centre, binary, radius)
     pen = _restroke(centre, radius)
-    # Short, thick strokes (the hook of a ㄷ written in one turn of the pen) have no centre
-    # line of their own.  Keep the middle band of every stroke, ``radius`` either side of its
-    # ridge, so they survive -- at the same width as everything else.
-    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
-    reach = int(np.ceil(dist.max())) * 2 + 1
-    ridge = cv2.dilate(dist, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (reach, reach)))
-    band = np.clip(dist - (ridge - 2 * radius) + 0.5, 0, 1) * (binary > 0)
-    return np.maximum(pen, band)[pad:-pad, pad:-pad]
+    if f > 1:
+        h, w = pen.shape
+        pen = cv2.resize(pen, (w // f, h // f), interpolation=cv2.INTER_AREA)
+        pen = np.clip(pen * 1.1, 0, 1)
+    return pen[pad:pad + mask.shape[0], pad:pad + mask.shape[1]]
 
 
 NEIGHBOURS = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
 
 
-def _extend_ends(centre, binary, dist, radius):
-    """Grow each centre-line end along its direction while the stroke continues, stopping
-    where the stroke gets narrower than the pen (so the pen's round tip meets the stroke tip)."""
+def _neighbours(on, y, x):
+    return [(y + dy, x + dx) for dy, dx in NEIGHBOURS if (y + dy, x + dx) in on]
+
+
+def _prune_spurs(centre, length):
+    """Remove short side branches (an end that reaches a junction within ``length`` px)."""
+    ys, xs = np.nonzero(centre)
+    on = set(zip(ys.tolist(), xs.tolist()))
+    for y, x in list(on):
+        if (y, x) not in on or len(_neighbours(on, y, x)) != 1:
+            continue
+        path, cur, prev = [(y, x)], (y, x), None
+        while len(path) <= length:
+            nb = [p for p in _neighbours(on, *cur) if p != prev and p not in path]
+            if len(nb) != 1:
+                break
+            prev, cur = cur, nb[0]
+            if len(_neighbours(on, *cur)) >= 3:  # reached a junction: this was a spur
+                for p in path:
+                    on.discard(p)
+                    centre[p] = 0
+                break
+            path.append(cur)
+
+
+def _extend_ends(centre, binary, radius):
+    """Push every stroke end out along its direction to the tip of the original stroke,
+    stopping one pen radius short so the round pen ends where the stroke ended."""
     H, W = centre.shape
     ys, xs = np.nonzero(centre)
     on = set(zip(ys.tolist(), xs.tolist()))
     for y, x in list(on):
-        nb = [(y + dy, x + dx) for dy, dx in NEIGHBOURS if (y + dy, x + dx) in on]
+        nb = _neighbours(on, y, x)
         if len(nb) != 1:
             continue
-        # Direction: from a point a few steps back along the line towards the end.
-        path, prev, cur = [(y, x)], (y, x), nb[0]
-        for _ in range(5):
+        path, cur = [(y, x)], nb[0]
+        for _ in range(int(2 * radius) + 4):
             path.append(cur)
-            nxt = [(cur[0] + dy, cur[1] + dx) for dy, dx in NEIGHBOURS
-                   if (cur[0] + dy, cur[1] + dx) in on and (cur[0] + dy, cur[1] + dx) not in path]
+            nxt = [p for p in _neighbours(on, *cur) if p not in path]
             if len(nxt) != 1:
                 break
-            prev, cur = cur, nxt[0]
+            cur = nxt[0]
         by, bx = path[-1]
         vy, vx = y - by, x - bx
         norm = float(np.hypot(vy, vx))
         if norm < 1:
             continue
         vy, vx = vy / norm, vx / norm
-        t = 0.5
-        while t < 4 * radius + 6:
-            py, px = int(round(y + vy * t)), int(round(x + vx * t))
-            if not (0 <= py < H and 0 <= px < W) or not binary[py, px] or dist[py, px] < 0.8 * radius:
+        t = 0.0
+        while True:
+            py, px = int(round(y + vy * (t + 0.5))), int(round(x + vx * (t + 0.5)))
+            if not (0 <= py < H and 0 <= px < W) or not binary[py, px]:
                 break
-            centre[py, px] = 1.0
             t += 0.5
+        reach = t - radius
+        step = 0.5
+        while step <= reach:
+            centre[int(round(y + vy * step)), int(round(x + vx * step))] = 1.0
+            step += 0.5
 
 
 def pen_glyph(glyph_mask, scale, angle, elastic, rng, aspect, target):
-    """Scale a glyph to output size and draw it with the uniform pen.  Small letters (formula
+    """Scale a glyph to output size and draw it with the monoline pen.  Small letters (formula
     symbols, indices) are drawn at up to 3x and reduced afterwards, so the humps of an m or the
     dot of an i do not melt together while the centre line is traced."""
     height = glyph_mask.shape[0] * scale
