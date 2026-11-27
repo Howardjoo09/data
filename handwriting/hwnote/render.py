@@ -42,15 +42,20 @@ class Options:
     seed: int | None = None
     # Pen width as a fraction of the Hangul height (0.12 in the writer's own notes); 0 keeps
     # the strokes exactly as written in the template.
-    stroke: float = 0.11
+    stroke: float = 0.12
     # How far each syllable's size is pulled towards the typical size of its shape
     # (0 = as written in its template box, 1 = all the same).
     evenness: float = 0.5
 
+# Grid paper as in the writer's notes: beige sheet, 4.24 mm squares, soft grey-beige lines.
+GRID_PAPER = (251, 249, 237)
+GRID_LINE = (224, 223, 213)
+GRID_STEP = 4.24
+
 MID_LINE = set("-=+~×÷±∓→←⇒⇐⇔·∙:<>≤≥≠≈∞()[]{}|")
 
 # Spacing measured in the writer's notes, in units of the Hangul height.
-LETTER_GAP = {"hangul": 0.09, "latin": 0.07}
+LETTER_GAP = {"hangul": 0.045, "latin": 0.05}
 WORD_GAP = 0.5
 
 
@@ -134,6 +139,13 @@ class GlyphFactory:
                                  float(np.median([g.top + g.h for g in gs])) - pad / 2)
                            for key, gs in by_shape.items() if len(gs) >= 2}
         self._font_cache = {}
+        self._skeletons = {}
+
+    def skeleton(self, glyph):
+        key = id(glyph)
+        if key not in self._skeletons:
+            self._skeletons[key] = (glyph, skeleton(glyph.mask))  # keep glyph alive: ids stay unique
+        return self._skeletons[key][1]
 
     @staticmethod
     def shape(ch):
@@ -218,7 +230,10 @@ class GlyphFactory:
 
 def _paper(opts, width, height, r, rng):
     page = np.empty((height, width, 3), np.uint8)
-    page[:] = (250, 249, 244) if opts.paper != "blank" else (252, 252, 250)
+    if opts.paper == "grid":
+        page[:] = GRID_PAPER
+    else:
+        page[:] = (250, 249, 244) if opts.paper != "blank" else (252, 252, 250)
     noise = rng.normal(0, 1.6, (height // 4 + 1, width // 4 + 1)).astype(np.float32)
     noise = cv2.resize(noise, (width, height), interpolation=cv2.INTER_LINEAR)[..., None]
     page = np.clip(page.astype(np.float32) + noise, 0, 255).astype(np.uint8)
@@ -230,11 +245,11 @@ def _paper(opts, width, height, r, rng):
                      cv2.LINE_AA)
             y += opts.line_pitch
     elif opts.paper == "grid":
-        step = 5.0
-        for x in np.arange(5.0, 210.0, step):
-            cv2.line(page, (int(x * r), 0), (int(x * r), height), (222, 222, 218), 1, cv2.LINE_AA)
-        for y in np.arange(5.0, 297.0, step):
-            cv2.line(page, (0, int(y * r)), (width, int(y * r)), (222, 222, 218), 1, cv2.LINE_AA)
+        thick = max(1, int(round(0.15 * r)))
+        for x in np.arange(GRID_STEP, 210.0, GRID_STEP):
+            cv2.line(page, (int(x * r), 0), (int(x * r), height), GRID_LINE, thick, cv2.LINE_AA)
+        for y in np.arange(GRID_STEP, 297.0, GRID_STEP):
+            cv2.line(page, (0, int(y * r)), (width, int(y * r)), GRID_LINE, thick, cv2.LINE_AA)
     if opts.margin_line and opts.paper != "blank":
         cv2.line(page, (int(24 * r), 0), (int(24 * r), height), (232, 150, 150), max(1, int(r * 0.15)),
                  cv2.LINE_AA)
@@ -275,14 +290,45 @@ class Placed:
     gap: float        # px, space after the glyph
 
 
-def _thicken(mask, radius):
-    """Widen strokes by ``radius`` px (fractional, anti-aliased)."""
-    if radius < 0.25:
-        return mask
-    pad = int(np.ceil(radius)) + 1
-    m = cv2.copyMakeBorder(mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-    dist = cv2.distanceTransform((m < 0.5).astype(np.uint8), cv2.DIST_L2, 3)
-    return np.maximum(m, np.clip(radius + 0.5 - dist, 0, 1))[pad:-pad, pad:-pad]
+def skeleton(mask):
+    """Centre line of the strokes (Zhang-Suen thinning): the path the pen tip travelled."""
+    smooth = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), 0.8)
+    img = np.pad((smooth > 0.45).astype(np.uint8), 1)
+    while True:
+        changed = False
+        for step in (0, 1):
+            P = np.pad(img, 1)
+            p2, p3, p4 = P[:-2, 1:-1], P[:-2, 2:], P[1:-1, 2:]
+            p5, p6, p7 = P[2:, 2:], P[2:, 1:-1], P[2:, :-2]
+            p8, p9 = P[1:-1, :-2], P[:-2, :-2]
+            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+            neighbours = sum(n.astype(np.int16) for n in ring[:8])
+            turns = sum(((a == 0) & (b == 1)).astype(np.int16) for a, b in zip(ring, ring[1:]))
+            if step == 0:
+                side = (p2 * p4 * p6 == 0) & (p4 * p6 * p8 == 0)
+            else:
+                side = (p2 * p4 * p8 == 0) & (p2 * p6 * p8 == 0)
+            remove = (img == 1) & (neighbours >= 2) & (neighbours <= 6) & (turns == 1) & side
+            if remove.any():
+                img[remove] = 0
+                changed = True
+        if not changed:
+            break
+    out = img[1:-1, 1:-1].astype(np.float32)
+    # Dots (the top of ㅎ, a full stop) can vanish entirely; keep one centre pixel of each.
+    n, labels, stats, cents = cv2.connectedComponentsWithStats((smooth > 0.45).astype(np.uint8))
+    for i in range(1, n):
+        if not out[labels == i].any():
+            out[int(round(cents[i][1])), int(round(cents[i][0]))] = 1.0
+    return out
+
+
+def _restroke(centre, radius):
+    """Draw a centre line with a round pen of the given radius (px), anti-aliased."""
+    pad = int(np.ceil(radius)) + 2
+    line = cv2.copyMakeBorder(centre, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
+    dist = cv2.distanceTransform((line == 0).astype(np.uint8), cv2.DIST_L2, 5)
+    return np.clip(radius + 0.5 - dist, 0, 1)[pad:-pad, pad:-pad]
 
 
 def _crisp(mask):
@@ -318,10 +364,15 @@ class Renderer:
             if typical and ink_h > 0:
                 s_mm *= float(np.clip((typical[1] / ink_h) ** o.evenness, 0.8, 1.25))
         scale = s_mm * self.r / PX
-        mask, _ = _transform(glyph.mask, scale, rng.normal(0, 0.8 * mess), 0.006 * mess, rng)
+        angle, elastic = rng.normal(0, 0.8 * mess), 0.006 * mess
         if o.stroke > 0:
-            mask = _thicken(mask, (self.target_stroke - self.p.stroke * scale) / 2)
-        mask = _crisp(mask)
+            # Same pen for every character: redraw the centre line at one width, so letters
+            # copied, assembled from jamo or taken from the fallback font all match.
+            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, elastic, rng)
+            mask = _restroke((centre > 0.12).astype(np.float32), max(0.5, self.target_stroke / 2 - 0.5))
+        else:
+            mask, _ = _transform(glyph.mask, scale, angle, elastic, rng)
+            mask = _crisp(mask)
         cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
         rows = np.nonzero(mask.max(axis=1) > 0.2)[0]
         if len(cols) == 0:
