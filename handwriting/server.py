@@ -172,6 +172,34 @@ def calibrate_profile(profile_id):
                     "program": {k: round(rendered[k], 3) for k in keys}})
 
 
+@app.get("/api/profile/<profile_id>/glyphs")
+def profile_glyphs(profile_id):
+    """Every learned copy of every character, for choosing which ones to use."""
+    with open(os.path.join(_profile_path(profile_id), "profile.json"), encoding="utf-8") as f:
+        profile = json.load(f)
+    excluded = set(profile.get("excluded", []))
+    return jsonify([{"char": g["char"], "file": g["file"], "excluded": g["file"] in excluded}
+                    for g in profile["glyphs"]])
+
+
+@app.get("/api/profile/<profile_id>/glyph/<name>")
+def profile_glyph(profile_id, name):
+    if not re.match(r"^g\d{4,6}\.png$", name):
+        abort(404)
+    return send_from_directory(_profile_path(profile_id), name, max_age=3600)
+
+
+@app.post("/api/profile/<profile_id>/exclude")
+def exclude_glyphs(profile_id):
+    body = request.get_json(force=True, silent=True) or {}
+    files = [f for f in body.get("files", []) if isinstance(f, str)]
+    try:
+        excluded = extract.set_excluded(_profile_path(profile_id), files, not body.get("restore"))
+    except extract.ExtractError as exc:
+        return _error(str(exc))
+    return jsonify({"excluded": excluded})
+
+
 @app.get("/api/profile/<profile_id>/sheet.png")
 def profile_sheet(profile_id):
     path = _profile_path(profile_id)

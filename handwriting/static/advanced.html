@@ -53,6 +53,13 @@
   <div id="profMsg" class="msg"></div>
   <div class="row">현재 글씨체 ID: <input id="profileId" size="12"> <button id="loadProf">불러오기</button></div>
   <div id="sheetBox"></div>
+  <details class="row" id="pickBox">
+    <summary>쓸 글자 고르기 (잘못 써진 글자 빼기)</summary>
+    <p class="muted">글자를 누르면 흐려지고 더 이상 쓰이지 않습니다. 다시 누르면 되살아납니다.
+      같은 글자를 여러 번 썼다면 마음에 안 드는 것만 빼세요.</p>
+    <div class="row"><input id="pickFilter" placeholder="글자로 찾기 (예: m i 으)" size="24"></div>
+    <div id="pickGrid"></div>
+  </details>
   <details class="row">
     <summary>내 문장 샘플로 보정하기 (선택)</summary>
     <p class="muted">평소처럼 문장 몇 줄을 쓴 사진과 그 내용을 올리면, 글자마다 크기·폭을 실제 필기에 맞춰 보정합니다.
@@ -180,6 +187,35 @@ $("calBtn").onclick = async () => {
       `글자 폭: 내 필기 ${r.sample.width} / 프로그램 ${r.program.width}, ` +
       `글자 사이: ${r.sample.letter_gap} / ${r.program.letter_gap}, 단어 사이: ${r.sample.word_gap} / ${r.program.word_gap}`);
   } catch (e) { show($("calMsg"), e.message, true); }
+};
+
+let glyphList = [];
+async function loadGlyphs() {
+  const id = $("profileId").value.trim();
+  if (!id) return;
+  try { glyphList = await call(`/api/profile/${encodeURIComponent(id)}/glyphs`); drawGlyphs(); } catch (e) {}
+}
+function drawGlyphs() {
+  const id = $("profileId").value.trim();
+  const want = $("pickFilter").value.replace(/\s+/g, "");
+  const items = glyphList.filter((g) => !want || want.includes(g.char));
+  $("pickGrid").innerHTML = items.map((g) =>
+    `<span class="pick" data-file="${g.file}" title="${escapeHtml(g.char)}" style="display:inline-block;text-align:center;margin:3px;cursor:pointer;` +
+    `opacity:${g.excluded ? 0.2 : 1}"><img loading="lazy" src="/api/profile/${encodeURIComponent(id)}/glyph/${g.file}" ` +
+    `style="height:40px;border:1px solid #ddd;background:#fff"><br><small>${escapeHtml(g.char)}</small></span>`).join("");
+}
+$("pickFilter").oninput = drawGlyphs;
+$("pickBox").ontoggle = () => { if ($("pickBox").open) loadGlyphs(); };
+$("pickGrid").onclick = async (event) => {
+  const el = event.target.closest(".pick");
+  if (!el) return;
+  const g = glyphList.find((x) => x.file === el.dataset.file);
+  const id = $("profileId").value.trim();
+  try {
+    await call(`/api/profile/${encodeURIComponent(id)}/exclude`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files: [g.file], restore: g.excluded }) });
+    g.excluded = !g.excluded; drawGlyphs();
+  } catch (e) { alert(e.message); }
 };
 
 async function loadProfile(id) {

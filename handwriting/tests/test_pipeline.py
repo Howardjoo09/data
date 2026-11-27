@@ -155,6 +155,19 @@ class PipelineTests(unittest.TestCase):
         self.assertGreater((ink[int(288 * k):int(302 * k)] > 100).sum(), 50)     # second line kept its place
         self.assertLess((ink[int(150 * k):int(250 * k)] > 100).mean(), 0.001)  # nothing in between
 
+    def test_excluded_copies_are_not_used(self):
+        directory = extract.profile_dir(self.data, self.profile["id"])
+        files = [g["file"] for g in self.profile["glyphs"] if g["char"] == "a"]
+        before = len(render.Profile(directory).glyphs["a"])
+        extract.set_excluded(directory, files[:1])
+        try:
+            self.assertEqual(len(render.Profile(directory).glyphs.get("a", [])), before - 1)
+            with self.assertRaises(extract.ExtractError):
+                extract.set_excluded(directory, ["../profile.json"])
+        finally:
+            extract.set_excluded(directory, files[:1], excluded=False)
+        self.assertEqual(len(render.Profile(directory).glyphs["a"]), before)
+
     def test_web_api(self):
         os.environ["HWNOTE_DATA"] = self.data
         import server

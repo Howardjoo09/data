@@ -91,7 +91,10 @@ class Profile:
         self.char_scale = data.get("char_scale", {})
         self.char_width = data.get("char_width", {})
         self.glyphs = {}
+        excluded = set(data.get("excluded", []))  # copies the writer chose not to use
         for g in data["glyphs"]:
+            if g["file"] in excluded:
+                continue
             mask = cv2.imread(os.path.join(directory, g["file"]), cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 continue

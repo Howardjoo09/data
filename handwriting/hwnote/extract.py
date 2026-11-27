@@ -268,3 +268,21 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
     if not profile["glyphs"]:
         warnings.append("글자를 하나도 찾지 못했습니다. 펜이 너무 연하거나 칸이 비어 있지 않은지 확인해 주세요.")
     return profile, empty_all, warnings
+
+
+def set_excluded(directory, files, excluded=True):
+    """Stop (or resume) using particular glyph copies of a profile, e.g. an i written with its
+    dot touching the stem.  The images are kept, so this can be undone."""
+    path = os.path.join(directory, "profile.json")
+    with open(path, encoding="utf-8") as f:
+        profile = json.load(f)
+    known = {g["file"] for g in profile["glyphs"]}
+    unknown = [name for name in files if name not in known]
+    if unknown:
+        raise ExtractError("모르는 글자 이미지입니다: " + ", ".join(unknown))
+    current = set(profile.get("excluded", []))
+    current = current | set(files) if excluded else current - set(files)
+    profile["excluded"] = sorted(current)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False)
+    return profile["excluded"]
