@@ -61,6 +61,7 @@ def _profile_summary(profile):
     chars = {g["char"] for g in profile["glyphs"]}
     return {
         "id": profile["id"],
+        "name": profile.get("name") or "이름 없는 글씨체",
         "glyphs": len(profile["glyphs"]),
         "chars": len(chars),
         "hangul": sum(1 for c in chars if charsets.is_syllable(c)),
@@ -483,6 +484,44 @@ def my_handwriting():
         return jsonify({"profile": _profile_summary(json.load(f))})
 
 
+def _import_zip(data):
+    """Unpack a handwriting file (zip exported from this app) into a profile; returns it."""
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise extract.ExtractError("글씨체 파일이 아닙니다 (zip 파일이어야 합니다).")
+    members = {}
+    for info in archive.infolist():
+        name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
+        if info.is_dir() or not PROFILE_FILE.match(name):
+            continue
+        if info.file_size > 20 * 1024 * 1024:
+            raise extract.ExtractError("글씨체 파일 안에 너무 큰 파일이 있습니다.")
+        members[name] = archive.read(info)
+    if "profile.json" not in members:
+        raise extract.ExtractError("글씨체 파일에 profile.json이 없습니다. 이 앱에서 내보낸 글씨체 파일인지 확인해 주세요.")
+    try:
+        profile = json.loads(members["profile.json"].decode("utf-8"))
+        names = [g["file"] for g in profile["glyphs"]]
+    except (ValueError, KeyError, TypeError):
+        raise extract.ExtractError("글씨체 파일의 profile.json을 읽을 수 없습니다.")
+    missing = [n for n in names if n not in members]
+    if missing:
+        raise extract.ExtractError(f"글씨체 파일에 글자 이미지 {len(missing)}개가 빠져 있습니다.")
+    profile_id = profile.get("id") if PROFILE_RE.match(str(profile.get("id", ""))) else secrets.token_hex(5)
+    profile["id"] = profile_id
+    path = extract.profile_dir(DATA, profile_id)
+    shutil.rmtree(path, ignore_errors=True)
+    os.makedirs(path)
+    for name, content in members.items():
+        if name != "profile.json":
+            with open(os.path.join(path, name), "wb") as f:
+                f.write(content)
+    with open(os.path.join(path, "profile.json"), "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False)
+    return profile
+
+
 @app.post("/api/me/import")
 def import_handwriting():
     """Take a handwriting file (zip exported from this app) and make it my handwriting."""
@@ -490,41 +529,10 @@ def import_handwriting():
     if not upload or not upload.filename:
         return _error("글씨체 파일(.zip)을 골라 주세요.")
     try:
-        archive = zipfile.ZipFile(io.BytesIO(upload.read()))
-    except zipfile.BadZipFile:
-        return _error("글씨체 파일이 아닙니다 (zip 파일이어야 합니다).")
-    members = {}
-    for info in archive.infolist():
-        name = info.filename.replace("\\", "/").rsplit("/", 1)[-1]
-        if info.is_dir() or not PROFILE_FILE.match(name):
-            continue
-        if info.file_size > 20 * 1024 * 1024:
-            return _error("글씨체 파일 안에 너무 큰 파일이 있습니다.")
-        members[name] = archive.read(info)
-    if "profile.json" not in members:
-        return _error("글씨체 파일에 profile.json이 없습니다.")
-    try:
-        profile = json.loads(members["profile.json"].decode("utf-8"))
-        names = [g["file"] for g in profile["glyphs"]]
-    except (ValueError, KeyError, TypeError):
-        return _error("글씨체 파일의 profile.json을 읽을 수 없습니다.")
-    missing = [n for n in names if n not in members]
-    if missing:
-        return _error(f"글씨체 파일에 글자 이미지 {len(missing)}개가 빠져 있습니다.")
-    profile_id = profile.get("id") if PROFILE_RE.match(str(profile.get("id", ""))) else secrets.token_hex(5)
-    profile["id"] = profile_id
-    path = extract.profile_dir(DATA, profile_id)
-    shutil.rmtree(path, ignore_errors=True)
-    os.makedirs(path)
-    for name, data in members.items():
-        if name != "profile.json":
-            with open(os.path.join(path, name), "wb") as f:
-                f.write(data)
-    with open(os.path.join(path, "profile.json"), "w", encoding="utf-8") as f:
-        json.dump(profile, f, ensure_ascii=False)
-    settings = _settings()
-    settings["profile_id"] = profile_id
-    _save_settings(settings)
+        profile = _import_zip(upload.read())
+    except extract.ExtractError as exc:
+        return _error(str(exc))
+    _add_hand(profile["id"], default=True)
     return jsonify({"profile": _profile_summary(profile)})
 
 
@@ -532,9 +540,7 @@ def import_handwriting():
 def use_handwriting(profile_id):
     """Make a profile built on the advanced page my handwriting."""
     path = _profile_path(profile_id)
-    settings = _settings()
-    settings["profile_id"] = profile_id
-    _save_settings(settings)
+    _add_hand(profile_id, default=True)
     with open(os.path.join(path, "profile.json"), encoding="utf-8") as f:
         return jsonify({"profile": _profile_summary(json.load(f))})
 
@@ -558,6 +564,151 @@ def profile_zip(path):
         for g in profile["glyphs"]:
             archive.write(os.path.join(path, g["file"]), g["file"])
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- handwritings
+# Several people's handwriting can be kept; the chosen one ("profile_id" in the settings) is
+# what conversions use.  A handwriting is added from a handwriting file (zip) or learned from
+# filled-in templates, copy sheets or photos of free writing.
+
+def _hand_ids():
+    settings = _settings()
+    ids = settings.get("hands")
+    if ids is None:  # settings from before there could be several
+        ids = [settings["profile_id"]] if settings.get("profile_id") else []
+    return [i for i in ids if PROFILE_RE.match(i) and
+            os.path.exists(os.path.join(extract.profile_dir(DATA, i), "profile.json"))]
+
+
+def _add_hand(profile_id, default=False):
+    settings = _settings()
+    ids = _hand_ids()
+    if profile_id not in ids:
+        ids.append(profile_id)
+    settings["hands"] = ids
+    if default or not _my_profile()[0]:
+        settings["profile_id"] = profile_id
+    _save_settings(settings)
+
+
+def _read_profile(profile_id):
+    with open(os.path.join(_profile_path(profile_id), "profile.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_profile(profile):
+    with open(os.path.join(extract.profile_dir(DATA, profile["id"]), "profile.json"), "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False)
+
+
+@app.get("/api/hands")
+def list_hands():
+    chosen, _ = _my_profile()
+    out = []
+    for profile_id in _hand_ids():
+        summary = _profile_summary(_read_profile(profile_id))
+        summary["chosen"] = profile_id == chosen
+        out.append(summary)
+    return jsonify({"hands": out, "chosen": chosen})
+
+
+def _learn_job(job, uploads, name, transcript, hint, extend):
+    """Learn a handwriting from filled-in templates / copy sheets / photos (or add to one)."""
+    try:
+        with WORK_LOCK:
+            _job_update(job, state="running", started=time.time())
+            profile, empty, warnings = extract.build_profile(DATA, uploads, hint or None, extend or None,
+                                                             transcript=transcript)
+        if not extend:
+            profile["name"] = name
+            _write_profile(profile)
+        _add_hand(profile["id"], default=not extend)
+        summary = _profile_summary(profile)
+        _job_update(job, state="done", hand=summary, warnings=warnings, empty=len(empty), finished=time.time())
+    except extract.ExtractError as exc:
+        _job_update(job, state="error", error=str(exc))
+    except Exception as exc:
+        _job_update(job, state="error", error=f"글씨체를 학습하지 못했습니다: {exc}")
+
+
+def _is_zip(data, filename):
+    return filename.lower().endswith(".zip") or data[:4] == b"PK\x03\x04"
+
+
+@app.post("/api/hands")
+def add_hand():
+    """Add a handwriting: a handwriting file (zip) is taken as it is; filled-in templates,
+    copy sheets (PDF or photos) or photos of free writing (with ``transcript``) are learned in
+    the background -- poll /api/jobs/<job>.  ``extend``: add the letters to that handwriting."""
+    files = [(f.read(), f.filename) for f in request.files.getlist("files") if f.filename]
+    if not files:
+        return _error("채운 템플릿·필사 시트(PDF·사진)나 글씨체 파일(.zip)을 골라 주세요.")
+    name = (request.form.get("name") or "").strip()[:40]
+    extend = request.form.get("extend", "").strip()
+    if extend:
+        _profile_path(extend)
+    zips = [(d, n) for d, n in files if _is_zip(d, n)]
+    if zips:
+        if len(files) > 1 or extend:
+            return _error("글씨체 파일(.zip)은 한 번에 하나씩, 새 글씨체로만 올릴 수 있습니다.")
+        try:
+            profile = _import_zip(zips[0][0])
+        except extract.ExtractError as exc:
+            return _error(str(exc))
+        if name:
+            profile["name"] = name
+            _write_profile(profile)
+        _add_hand(profile["id"], default=True)
+        return jsonify({"hand": _profile_summary(profile)})
+    hint = request.form.get("template_id", "").strip()
+    if hint and not hint.isdigit():
+        return _error("템플릿 ID는 숫자입니다.")
+    default_name = f"글씨체 {len(_hand_ids()) + 1}" if _hand_ids() else "내 글씨"
+    job = secrets.token_hex(6)
+    with JOB_LOCK:
+        JOBS[job] = {"id": job, "kind": "learn", "state": "waiting", "done": 0, "total": None, "pages": [],
+                     "pdf": None, "error": None, "created": time.time()}
+    threading.Thread(target=_learn_job, daemon=True,
+                     args=(job, files, name or default_name, request.form.get("transcript", "")[:MAX_TEXT],
+                           hint, extend)).start()
+    return jsonify({"job": job})
+
+
+@app.post("/api/hands/<profile_id>/choose")
+def choose_hand(profile_id):
+    _profile_path(profile_id)
+    _add_hand(profile_id, default=True)
+    return list_hands()
+
+
+@app.post("/api/hands/<profile_id>/rename")
+def rename_hand(profile_id):
+    name = ((request.get_json(force=True, silent=True) or {}).get("name") or "").strip()[:40]
+    if not name:
+        return _error("이름을 입력해 주세요.")
+    profile = _read_profile(profile_id)
+    profile["name"] = name
+    _write_profile(profile)
+    return jsonify({"hand": _profile_summary(profile)})
+
+
+@app.delete("/api/hands/<profile_id>")
+def delete_hand(profile_id):
+    path = _profile_path(profile_id)
+    settings = _settings()
+    settings["hands"] = [i for i in _hand_ids() if i != profile_id]
+    if settings.get("profile_id") == profile_id:
+        settings["profile_id"] = settings["hands"][0] if settings["hands"] else None
+    _save_settings(settings)
+    shutil.rmtree(path, ignore_errors=True)
+    return list_hands()
+
+
+@app.get("/api/hands/<profile_id>/export")
+def export_hand(profile_id):
+    path = _profile_path(profile_id)
+    name = re.sub(r"[\\/:*?\"<>|\s]+", "_", _read_profile(profile_id).get("name") or "handwriting")
+    return send_file(io.BytesIO(profile_zip(path)), mimetype="application/zip", download_name=f"{name}_글씨체.zip")
 
 
 # --------------------------------------------------------------------------- conversion jobs

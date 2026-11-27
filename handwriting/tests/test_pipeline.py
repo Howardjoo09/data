@@ -303,6 +303,57 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(r["cells"], 110)
         self.assertGreater(r["coverage"]["direct"], 0.9)
 
+    def test_several_handwritings(self):
+        import time
+        import shutil
+        data = os.path.join(self.data, "hands")
+        os.makedirs(os.path.join(data, "templates"), exist_ok=True)
+        for name in os.listdir(os.path.join(self.data, "templates")):
+            shutil.copy(os.path.join(self.data, "templates", name), os.path.join(data, "templates"))
+        import server
+        server.DATA = data
+        client = server.app.test_client()
+
+        def finish(job):
+            for _ in range(600):
+                state = client.get(f"/api/jobs/{job}").json
+                if state["state"] in ("done", "error"):
+                    return state
+                time.sleep(0.1)
+            self.fail("learning did not finish")
+
+        self.assertEqual(client.get("/api/hands").json["hands"], [])
+        # A filled-in template is learned as a handwriting (no zip needed).
+        r = client.post("/api/hands", data={"files": [(io.BytesIO(self.photos[0]), "p1.jpg")], "name": "민수"},
+                        content_type="multipart/form-data")
+        state = finish(r.json["job"])
+        self.assertEqual(state["state"], "done", state)
+        first = state["hand"]["id"]
+        self.assertEqual(state["hand"]["name"], "민수")
+        # Its handwriting file adds the same handwriting again under another name.
+        archive = client.get(f"/api/hands/{first}/export").data
+        client.delete(f"/api/hands/{first}")
+        r = client.post("/api/hands", data={"files": [(io.BytesIO(archive), "x.zip")], "name": "지수"},
+                        content_type="multipart/form-data")
+        self.assertEqual(r.status_code, 200, r.json)
+        second = r.json["hand"]["id"]
+        # More letters added to it from the next template page.
+        before = r.json["hand"]["glyphs"]
+        r = client.post("/api/hands", data={"files": [(io.BytesIO(self.photos[1]), "p2.jpg")], "extend": second},
+                        content_type="multipart/form-data")
+        state = finish(r.json["job"])
+        self.assertGreater(state["hand"]["glyphs"], before)
+        hands = client.get("/api/hands").json
+        self.assertEqual([h["name"] for h in hands["hands"]], ["지수"])
+        self.assertEqual(hands["chosen"], second)
+        r = client.post(f"/api/hands/{second}/rename", json={"name": "지수 글씨"})
+        self.assertEqual(r.json["hand"]["name"], "지수 글씨")
+        # Something that is neither a template nor a handwriting file is refused with a reason.
+        r = client.post("/api/hands", data={"files": [(io.BytesIO(b"hello"), "note.txt")]},
+                        content_type="multipart/form-data")
+        state = finish(r.json["job"]) if r.status_code == 200 else {"state": "error"}
+        self.assertEqual(state["state"], "error")
+
     def test_page_ranges(self):
         import server
         self.assertEqual(server.parse_pages("", 3), [0, 1, 2])
