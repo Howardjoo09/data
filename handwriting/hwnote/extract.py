@@ -233,7 +233,8 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
     resolved = pages
     copy_glyphs, copy_report = [], None
     if copies:
-        copy_glyphs, copy_report, _, _ = copysheet.read_pages(copies)
+        copy_glyphs, copy_report, _, copy_lines = copysheet.read_pages(copies)
+        copy_lines = [T.plain_text(line) for line in copy_lines]
         if copy_report["chars"] and copy_report["learned"] < 0.4 * copy_report["chars"]:
             warnings.append(f"필사 시트: {copy_report['chars']}자 중 {copy_report['learned']}자만 확실하게 "
                             "찾았습니다. 줄을 건너뛰거나 다른 줄에 쓰지 않았는지 확인해 주세요.")
@@ -283,6 +284,8 @@ def build_profile(data_dir, uploads, template_hint=None, profile_id=None, transc
             profile["glyphs"].append(g)
     if copy_report:
         profile["copy_report"] = {k: copy_report[k] for k in ("chars", "learned", "lines")}
+        profile["copy_style"] = copy_report.get("style")
+        profile["copy_lines"] = copy_lines[:24]
     if evaluation:
         kept = copysheet.save_evaluation(directory, evaluation)
         warnings.append(f"평가용 필사 시트 {kept}줄은 학습하지 않고 비교용으로 보관했습니다.")

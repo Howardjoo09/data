@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (GAP_WANDER, HANGUL_ASPECT, INK_GAP, LETTER_GAP, MID_LINE, VERTICAL_WANDER, WORD_GAP, InkSpacer, PX, GlyphFactory, Options, _crisp, _paper, pen_glyph,
+from .render import (with_layout, GAP_WANDER, HANGUL_ASPECT, INK_GAP, LETTER_GAP, MID_LINE, VERTICAL_WANDER, WORD_GAP, InkSpacer, PX, GlyphFactory, Options, _crisp, _paper, pen_glyph,
                      _transform)
 
 DELIMS = set("()[]{}|")
@@ -99,7 +99,7 @@ def _group_pieces(chars):
 class PageWriter:
     def __init__(self, profile, opts=None, seed=None):
         self.p = profile
-        self.o = opts or Options(paper="grid", margin_line=False)
+        self.o = with_layout(opts or Options(paper="grid", margin_line=False), profile)
         self.rng = np.random.default_rng(seed if seed is not None else self.o.seed)
         self.factory = GlyphFactory(profile, self.rng)
         self.k = self.o.dpi / 72.0  # px per point
@@ -147,9 +147,10 @@ class PageWriter:
         """Pen-drawn mask of a glyph at ``s`` px per profile-mm, with its ink box."""
         scale = s / PX
         if self.o.stroke > 0:
-            mask = pen_glyph(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect, self.pen)
+            mask = pen_glyph(glyph.mask, scale, angle, 0.004 * self.o.messiness, self.rng, aspect, self.pen,
+                             self.p.layout.get("shear", 0.0))
         else:
-            mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
+            mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect, self.p.layout.get("shear", 0.0))
             mask = _crisp(mask)
         rows = np.nonzero(mask.max(axis=1) > 0.2)[0]
         cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
@@ -206,7 +207,8 @@ class PageWriter:
             em = c.size * k
             glyph, cat, s = plans[id(c)]
             mask, box = self._render(glyph, s, self.rng.normal(0, 0.4 * o.messiness),
-                                     HANGUL_ASPECT * self.factory.hangul_aspect(c.ch, glyph, self.p.char_width.get(c.ch, 1.0)))
+                                     HANGUL_ASPECT * self.p.layout.get("aspect", 1.0)
+                                     * self.factory.hangul_aspect(c.ch, glyph, self.p.char_width.get(c.ch, 1.0)))
             if box is None:
                 continue
             a, b, t, u = box
@@ -222,7 +224,7 @@ class PageWriter:
         """Drawn width (points) of one character."""
         if id(c) in plans:
             glyph = plans[id(c)][0]
-            return (max(glyph.w - 4 / PX, 0.3) * plans[id(c)][2] * HANGUL_ASPECT
+            return (max(glyph.w - 4 / PX, 0.3) * plans[id(c)][2] * HANGUL_ASPECT * self.p.layout.get("aspect", 1.0)
                     * self.factory.hangul_aspect(c.ch, glyph, self.p.char_width.get(c.ch, 1.0)) / self.k)
         if id(c) in sym:
             return sym[id(c)][2]

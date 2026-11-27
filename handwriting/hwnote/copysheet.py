@@ -99,7 +99,18 @@ def read_pages(pages):
     text, skip = transcript(used)
     glyphs, report = freeform.extract_freeform(images, text, single_line=True, work_width=None, skip=skip)
     report["skip"] = skip
+    report["style"] = measure(images, report)
+    from .score import slant
+    report["style"]["slant"] = slant([g["mask"].astype(np.float32) / 255 for g in glyphs])
     return glyphs, report, images, used
+
+
+def measure(images, report):
+    """How the writer spaces and sizes their note-taking (see style.from_boxes)."""
+    from . import style
+    st = style.from_boxes(report["boxes"], report["spaces"])
+    st["stroke"] = style.stroke_ratio(images, report["boxes"])
+    return st
 
 
 def save_evaluation(directory, pages):

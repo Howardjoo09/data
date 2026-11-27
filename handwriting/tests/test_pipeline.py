@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
-from hwnote import charsets, compose, copysheet, extract, freeform, render, template as T, textio  # noqa: E402
+from hwnote import charsets, compose, copysheet, extract, freeform, render, score, style, template as T, textio  # noqa: E402
 import make_sample  # noqa: E402
 
 
@@ -399,6 +399,36 @@ class CopySheetTests(unittest.TestCase):
             images, lines = copysheet.load_evaluation(directory)
             self.assertEqual(lines, info["pages"][1])
             self.assertTrue(any("평가용" in w for w in warnings))
+
+
+    def test_layout_fit_and_score(self):
+        # A writer who leaves wide gaps: the fitted profile spaces its letters like them, and
+        # the score reports the writer's own text written by the program.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = os.path.join(tmp, "data")
+            os.makedirs(os.path.join(data, "templates"))
+            lines = T.wrap_copy_text(["수열의 수렴과 발산을 판정하는 방법에는 여러 가지가 있다. 함수의 극한값을 구할 때에는 "
+                                      "식을 변형한다. 미분가능한 두 함수에 대하여 합성함수도 미분가능하다."], width=100)
+            info = {"id": 100003, "layout": 2, "eval_pages": [1], "pages": [lines, lines[:2]]}
+            with open(os.path.join(data, "templates", "100003.json"), "w", encoding="utf-8") as f:
+                json.dump(info, f, ensure_ascii=False)
+            pdf = T.build_pdf(info)
+            font = font_file(tmp)
+            uploads = [(make_sample.fake_photo(make_sample.fill_copy_page(pdf, n, page, font, seed=n, hangul_mm=3.0),
+                                               seed=n), f"p{n}.jpg") for n, page in enumerate(info["pages"])]
+            profile, _, _ = extract.build_profile(data, uploads)
+            directory = extract.profile_dir(data, profile["id"])
+            target = profile["copy_style"]["letter_gap"]
+            before = style.measure_rendered(render.Profile(directory), profile["copy_lines"])["letter_gap"]
+            layout = style.calibrate_layout(directory, rounds=3)
+            self.assertGreater(layout["letter_spacing"], 1.5)  # the writer's gaps are wide
+            after = style.measure_rendered(render.Profile(directory), profile["copy_lines"])["letter_gap"]
+            self.assertLess(abs(after - target), 0.5 * abs(before - target))
+            images, eval_lines = copysheet.load_evaluation(directory)
+            result = score.evaluate(render.Profile(directory), images, eval_lines, seeds=(0,))
+            self.assertGreater(result["compared"], 10)
+            self.assertTrue(0.0 <= result["total"] <= 1.0)
+            self.assertIn("일치도", score.report_text(result))
 
 
 def copysheet_transcript(lines):

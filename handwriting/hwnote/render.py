@@ -4,7 +4,7 @@ import io
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import cv2
 import numpy as np
@@ -47,6 +47,9 @@ class Options:
     # How far each syllable's size is pulled towards the typical size of its shape
     # (0 = as written in its template box, 1 = all the same).
     evenness: float = 1.0
+    # Sheet size in mm (A4); measuring uses one long strip so a line never wraps.
+    page_width: float = 210.0
+    page_height: float = 297.0
 
 # Grid paper as in the writer's notes: beige sheet, 4.24 mm squares, soft grey-beige lines.
 GRID_PAPER = (251, 249, 237)
@@ -89,6 +92,10 @@ def _fallback_font(size):
     return ImageFont.truetype(io.BytesIO(_fallback_font_bytes()), size)
 
 
+NATURAL_SOURCES = {"copy", "freeform"}
+MIN_NATURAL = 2
+
+
 class Profile:
     def __init__(self, directory):
         with open(os.path.join(directory, "profile.json"), encoding="utf-8") as f:
@@ -98,7 +105,11 @@ class Profile:
         # Learned from a sample of the writer's sentences (hwnote/style.py).
         self.char_scale = data.get("char_scale", {})
         self.char_width = data.get("char_width", {})
+        # Spacing and width learned from the writer's copy sheets (style.calibrate_layout):
+        # factors on the renderer's letter/word spacing and syllable width.
+        self.layout = data.get("layout", {})
         self.glyphs = {}
+        natural = {}
         excluded = set(data.get("excluded", []))  # copies the writer chose not to use
         for g in data["glyphs"]:
             if g["file"] in excluded:
@@ -106,8 +117,15 @@ class Profile:
             mask = cv2.imread(os.path.join(directory, g["file"]), cv2.IMREAD_GRAYSCALE)
             if mask is None:
                 continue
-            self.glyphs.setdefault(g["char"], []).append(
-                Glyph(mask.astype(np.float32) / 255.0, g["top"], g["w"], g["h"]))
+            glyph = Glyph(mask.astype(np.float32) / 255.0, g["top"], g["w"], g["h"])
+            self.glyphs.setdefault(g["char"], []).append(glyph)
+            if g.get("source") in NATURAL_SOURCES:
+                natural.setdefault(g["char"], []).append(glyph)
+        # Letters written in running sentences look like the writer's notes; letters written
+        # alone in a box are neater.  Where there are enough of the former, use only those.
+        for ch, gs in natural.items():
+            if len(gs) >= MIN_NATURAL:
+                self.glyphs[ch] = gs
         baseline = data.get("baseline", 11.5)
         # Letters rebuilt from other letters of the writer, e.g. a round y (see LETTER_STYLES).
         for ch, how in data.get("letter_styles", {}).items():
@@ -450,9 +468,9 @@ def _paper(opts, width, height, r, rng):
             y += opts.line_pitch
     elif opts.paper == "grid":
         thick = max(1, int(round(0.15 * r)))
-        for x in np.arange(GRID_STEP, 210.0, GRID_STEP):
+        for x in np.arange(GRID_STEP, width / r, GRID_STEP):
             cv2.line(page, (int(x * r), 0), (int(x * r), height), GRID_LINE, thick, cv2.LINE_AA)
-        for y in np.arange(GRID_STEP, 297.0, GRID_STEP):
+        for y in np.arange(GRID_STEP, height / r, GRID_STEP):
             cv2.line(page, (0, int(y * r)), (width, int(y * r)), GRID_LINE, thick, cv2.LINE_AA)
     if opts.margin_line and opts.paper != "blank":
         cv2.line(page, (int(24 * r), 0), (int(24 * r), height), (232, 150, 150), max(1, int(r * 0.15)),
@@ -462,12 +480,13 @@ def _paper(opts, width, height, r, rng):
 
 def layout_bounds(opts):
     """Y (mm) of the first and last ruled line that carries text."""
-    return 30.0, 282.0
+    return 30.0, max(30.0, opts.page_height - 15.0)
 
 
-def _transform(mask, scale, angle, elastic, rng, aspect=1.0):
-    """Resize to output resolution (``aspect`` narrows or widens), then rotate and wobble a
-    little. Returns (mask, pad)."""
+def _transform(mask, scale, angle, elastic, rng, aspect=1.0, shear=0.0):
+    """Resize to output resolution (``aspect`` narrows or widens), then slant (``shear``: the
+    tangent of the lean, tops to the right when positive), rotate and wobble a little.
+    Returns (mask, pad)."""
     h, w = mask.shape
     nw, nh = max(1, int(round(w * scale * aspect))), max(1, int(round(h * scale)))
     m = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
@@ -475,6 +494,9 @@ def _transform(mask, scale, angle, elastic, rng, aspect=1.0):
     m = cv2.copyMakeBorder(m, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
     H, W = m.shape
     rot = cv2.getRotationMatrix2D((W / 2, H / 2), angle, 1.0)
+    if shear:
+        lean = np.array([[1.0, -shear, shear * H / 2], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        rot = (np.vstack([rot, [0.0, 0.0, 1.0]]) @ lean)[:2]
     m = cv2.warpAffine(m, rot, (W, H), flags=cv2.INTER_LINEAR)
     if elastic > 0:
         amp = elastic * max(nw, nh)
@@ -561,9 +583,14 @@ def uniform_pen(mask, target):
     binary = (big > 0.35).astype(np.uint8)
     centre = _thin(binary)
     radius = max(0.5, (target - 1) / 2) * f
-    # Thinning leaves spurs about half a stroke width long at corners; real short strokes
-    # (the arm of a y, the tick of a ㅏ) are longer and must stay.
-    _prune_spurs(centre, max(2, int(0.6 * width * f)))
+    # Thinning leaves spurs about half a stroke width long at corners.  Redrawn with a pen as
+    # wide as the stroke they stay inside its outline and keep the corner sharp, as written;
+    # only where the pen is thinner than the writing would they poke out as little ticks, so
+    # only that excess is pruned.  Real short strokes (the arm of a y, the tick of a ㅏ) are
+    # longer and stay.
+    spur = int(0.6 * max(0.0, width - target) * f)
+    if spur >= 2:
+        _prune_spurs(centre, spur)
     _extend_ends(centre, binary, radius)
     pen = _restroke(centre, radius)
     if f > 1:
@@ -637,13 +664,13 @@ def _extend_ends(centre, binary, radius):
             step += 0.5
 
 
-def pen_glyph(glyph_mask, scale, angle, elastic, rng, aspect, target):
+def pen_glyph(glyph_mask, scale, angle, elastic, rng, aspect, target, shear=0.0):
     """Scale a glyph to output size and draw it with the monoline pen.  Small letters (formula
     symbols, indices) are drawn at up to 3x and reduced afterwards, so the humps of an m or the
     dot of an i do not melt together while the centre line is traced."""
     height = glyph_mask.shape[0] * scale
     f = int(np.clip(np.ceil(70.0 / max(height, 1.0)), 1, 3))
-    mask, pad = _transform(glyph_mask, scale * f, angle, elastic, rng, aspect)
+    mask, pad = _transform(glyph_mask, scale * f, angle, elastic, rng, aspect, shear)
     mask = uniform_pen(mask, target * f)
     if f > 1:
         h, w = mask.shape
@@ -697,9 +724,21 @@ def _crisp(mask):
     return np.clip((mask - 0.12) / 0.6, 0, 1)
 
 
+def with_layout(opts, profile):
+    """Options with the profile's learned spacing and pen-width factors applied (the caller's
+    own settings still multiply them)."""
+    layout = getattr(profile, "layout", None) or {}
+    if not layout:
+        return opts
+    return replace(opts, letter_spacing=opts.letter_spacing * layout.get("letter_spacing", 1.0),
+                   word_spacing=opts.word_spacing * layout.get("word_spacing", 1.0),
+                   stroke=opts.stroke * layout.get("stroke", 1.0))
+
+
 class Renderer:
     def __init__(self, profile, opts):
-        self.p, self.o = profile, opts
+        self.p, self.o = profile, with_layout(opts, profile)
+        opts = self.o
         self.rng = np.random.default_rng(opts.seed)
         self.r = opts.dpi / 25.4  # output px per mm
         self.factory = GlyphFactory(profile, self.rng)
@@ -714,6 +753,7 @@ class Renderer:
         else:
             self.ink = INK_COLORS.get(opts.ink, INK_COLORS["black"])
         self.target_stroke = opts.stroke * self.hangul_h * self.r  # px
+        self.record = None  # set to a list to collect (x0, y0, x1, y1, mask) per character drawn
         # Ink height of a typical syllable at this size (glyph images carry a 0.4 mm margin).
         self.typical_ink_px = self.scale["hangul"] * (profile.hangul_h - 4 / PX) * self.r
 
@@ -733,12 +773,13 @@ class Renderer:
         if o.stroke > 0:
             # Same pen width for every character, so letters copied, assembled from jamo or
             # taken from the fallback font all match -- the strokes themselves are kept.
-            aspect = (HANGUL_ASPECT if category == "hangul" else 1.0) * \
+            aspect = (HANGUL_ASPECT * self.p.layout.get("aspect", 1.0) if category == "hangul" else 1.0) * \
                 self.factory.hangul_aspect(ch, glyph, self.p.char_width.get(ch, 1.0))
-            mask = pen_glyph(glyph.mask, scale, angle, elastic, rng, aspect, self.target_stroke)
+            mask = pen_glyph(glyph.mask, scale, angle, elastic, rng, aspect, self.target_stroke,
+                             self.p.layout.get("shear", 0.0))
         else:
             mask, _ = _transform(glyph.mask, scale, angle, elastic, rng,
-                                 HANGUL_ASPECT if category == "hangul" else 1.0)
+                                 HANGUL_ASPECT if category == "hangul" else 1.0, self.p.layout.get("shear", 0.0))
             mask = _crisp(mask)
         cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
         rows = np.nonzero(mask.max(axis=1) > 0.2)[0]
@@ -764,8 +805,8 @@ class Renderer:
     def render(self, text, max_pages=40):
         o, r = self.o, self.r
         text = charsets.normalize_text(text)
-        width, height = int(round(210 * r)), int(round(297 * r))
-        left, right = 28.0 * r, 192.0 * r
+        width, height = int(round(o.page_width * r)), int(round(o.page_height * r))
+        left, right = 28.0 * r, (o.page_width - 18.0) * r
         top, bottom = layout_bounds(o)
         lines_per_page = int((bottom - top) / o.line_pitch) + 1
 
@@ -822,6 +863,14 @@ class Renderer:
             target = (INK_GAP * self.o.letter_spacing + rng.normal(0, 0.012 * mess)) * self.typical_ink_px
             x0 = spacer.place(g.mask, y0, int(round(x)) - g.left, target)
             _composite(page, g.mask, x0, y0, ink)
+            if self.record is not None:  # exact ink box of every character, for measuring
+                rows = np.nonzero(g.mask.max(axis=1) > 0.3)[0]
+                cols = np.nonzero(g.mask.max(axis=0) > 0.3)[0]
+                if len(rows):
+                    self.record.append((x0 + int(cols[0]), y0 + int(rows[0]), x0 + int(cols[-1]) + 1,
+                                        y0 + int(rows[-1]) + 1, g.mask))
+                else:
+                    self.record.append(None)
             x = x0 + g.left + g.width
 
 
