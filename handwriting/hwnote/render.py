@@ -46,7 +46,7 @@ class Options:
     stroke: float = 0.075
     # How far each syllable's size is pulled towards the typical size of its shape
     # (0 = as written in its template box, 1 = all the same).
-    evenness: float = 0.45
+    evenness: float = 1.0
 
 # Grid paper as in the writer's notes: beige sheet, 4.24 mm squares, soft grey-beige lines.
 GRID_PAPER = (251, 249, 237)
@@ -56,12 +56,12 @@ GRID_STEP = 4.24
 MID_LINE = set("-=+~×÷±∓→←⇒⇐⇔·∙:<>≤≥≠≈∞()[]{}|")
 
 # Spacing measured in the writer's notes, in units of the Hangul height.
-LETTER_GAP = {"hangul": -0.045, "latin": 0.0}
+LETTER_GAP = {"hangul": -0.06, "latin": -0.01}
 # Measured on the writer's handwriting of a known passage (see hwnote/style.py), relative to
 # the syllable height: syllables are narrower than in template boxes (w/h 0.65), the gap
 # between syllables is 0.025 +- 0.08, words are 0.47 apart, and each syllable's centre wanders
 # 0.07 up or down -- the writing follows no ruler at the top or the bottom.
-VERTICAL_WANDER = 0.21   # x messiness (0.35 by default) = 0.073 of the syllable height
+VERTICAL_WANDER = 0.03   # x messiness (0.35 by default) = 0.01 of the syllable height
 GAP_WANDER = 0.12        # x messiness = 0.04
 HANGUL_ASPECT = 0.875
 WORD_GAP = 0.5
@@ -139,6 +139,18 @@ def _with_margin(original, inner):
     return out
 
 
+def latin_class(ch):
+    if ch in charsets.UPPER or ch in charsets.DIGITS or ch in "ΔΣ":
+        return "cap"
+    if ch in "acemnorsuvwxzαεθπσω":
+        return "short"
+    if ch in "bdhklt":
+        return "tall"
+    if ch in "gpqyηβμ":
+        return "desc"
+    return None
+
+
 class GlyphFactory:
     """Supplies a glyph for any character: handwritten, composed from jamo, or font fallback."""
 
@@ -170,8 +182,29 @@ class GlyphFactory:
                                  float(np.median([g.h for g in gs])) - pad,
                                  float(np.median([g.top + g.h for g in gs])) - pad / 2)
                            for key, gs in by_shape.items() if len(gs) >= 2}
+        # Typical ink height of each kind of Latin letter (capital, short, tall, descending).
+        by_class = {}
+        for c, variants in profile.glyphs.items():
+            cls = latin_class(c)
+            if cls:
+                by_class.setdefault(cls, []).extend(g.h - pad for g in variants)
+        self.latin_size = {cls: float(np.median(v)) for cls, v in by_class.items() if len(v) >= 3}
+        # How far this writer's descenders (g p y) reach below the line, relative to their height.
+        depth = [(g.top + g.h - profile.latin_bottom) / max(g.h - pad, 0.1)
+                 for c, gs in profile.glyphs.items() if latin_class(c) == "desc" for g in gs]
+        self.desc_depth = float(np.clip(np.median(depth), 0.2, 0.6)) if depth else 0.4
         self._font_cache = {}
         self._skeletons = {}
+
+    def latin_drop(self, ch, glyph, s):
+        """How far (in the units of ``s``) the ink bottom of a Latin letter goes below the line:
+        letters without descenders rest exactly on it, so a line's letters share one bottom."""
+        cls = latin_class(ch)
+        if cls in ("cap", "short", "tall"):
+            return 0.0
+        if cls == "desc":
+            return self.desc_depth * (glyph.h - 4 / PX) * s
+        return (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s
 
     def skeleton(self, glyph):
         if glyph.variant:
@@ -185,6 +218,15 @@ class GlyphFactory:
     def shape(ch):
         _, vowel, final = charsets.decompose(ch)
         return vowel_class(vowel), bool(final)
+
+    def typical_height(self, ch):
+        """Ink height (profile mm) every copy of ``ch`` is drawn at: the writer's typical height
+        for this kind of character, rather than whatever size it had in its template box."""
+        if charsets.is_syllable(ch):
+            size = self._shape_size(ch)
+            return size[1] if size else None
+        cls = latin_class(ch)
+        return self.latin_size.get(cls) if cls else None
 
     def _shape_size(self, ch):
         vclass, has_final = self.shape(ch)
@@ -524,10 +566,9 @@ class Renderer:
         glyph, category = self.factory.get(ch)
         s_mm = self.scale[category] * (1 + rng.normal(0, 0.02 * mess)) * self.p.char_scale.get(ch, 1.0)
         ink_h = glyph.h - 4 / PX  # the glyph image carries a 2 px margin
-        if category == "hangul" and charsets.is_syllable(ch) and o.evenness > 0:
-            typical = self.factory._shape_size(ch)
-            if typical and ink_h > 0:
-                s_mm *= float(np.clip((typical[1] / ink_h) ** o.evenness, 0.8, 1.25))
+        typical = self.factory.typical_height(ch)
+        if typical and ink_h > 0 and o.evenness > 0:
+            s_mm *= float(np.clip((typical / ink_h) ** o.evenness, 0.6, 1.6))
         scale = s_mm * self.r / PX
         angle, elastic = rng.normal(0, 0.8 * mess), 0.006 * mess
         if o.stroke > 0:
@@ -544,18 +585,16 @@ class Renderer:
         if len(cols) == 0:
             cols = rows = np.array([0])
         if category == "hangul":
-            # Centred on the line of writing: a short syllable (고, 이) sits halfway up the
-            # space a full one takes, as when writing in an imagined square.
-            drop = -(self.typical_ink_px - (rows[-1] - rows[0] + 1)) / 2
+            drop = 0.0  # every syllable rests on the line: bottoms in one row
         elif ch in MID_LINE:
             # Dashes, operators and brackets are centred on the writing, however they were
             # placed in their template box.
             drop = -(0.42 * self.hangul_h * self.r - (rows[-1] - rows[0] + 1) / 2)
         else:
-            drop = (glyph.top + glyph.h - 2 / PX - (self.p.latin_bottom - 2 / PX)) * s_mm * self.r
+            drop = self.factory.latin_drop(ch, glyph, s_mm * self.r)
         gap = (LETTER_GAP[category] * o.letter_spacing + rng.normal(0, GAP_WANDER * mess)) * self.hangul_h
         # Neighbours may touch, not overlap much; a gap inside a word never looks like a space.
-        gap = float(np.clip(gap, -0.07 * self.hangul_h, 0.03 * self.hangul_h))
+        gap = float(np.clip(gap, -0.08 * self.hangul_h, 0.0))
         return Placed(mask, int(cols[0]), int(rows[-1]), float(cols[-1] - cols[0] + 1), drop,
                       gap * self.r)
 
