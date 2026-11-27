@@ -14,7 +14,7 @@ import pymupdf
 from PIL import Image
 
 from . import charsets, mathfont
-from .render import (LETTER_GAP, MID_LINE, PX, GlyphFactory, Options, _crisp, _paper, _restroke,
+from .render import (HANGUL_ASPECT, LETTER_GAP, MID_LINE, PX, GlyphFactory, Options, _crisp, _paper, _restroke,
                      _transform)
 
 DELIMS = set("()[]{}|")
@@ -117,15 +117,16 @@ class PageWriter:
                 s *= float(np.clip((typical[1] / ink_h) ** o.evenness, 0.8, 1.25))
         return glyph, cat, s
 
-    def _render(self, glyph, s, angle):
+    def _render(self, glyph, s, angle, aspect=1.0):
         """Pen-drawn mask of a glyph at ``s`` px per profile-mm, with its ink box."""
         scale = s / PX
         if self.o.stroke > 0:
-            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, 0.004 * self.o.messiness, self.rng)
+            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, 0.004 * self.o.messiness,
+                                   self.rng, aspect)
             radius = min(self.pen / 2, 0.075 * glyph.h * s)
             mask = _restroke((centre > 0.12).astype(np.float32), max(0.5, radius - 0.5))
         else:
-            mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng)
+            mask, _ = _transform(glyph.mask, scale, angle, 0.0, self.rng, aspect)
             mask = _crisp(mask)
         rows = np.nonzero(mask.max(axis=1) > 0.2)[0]
         cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
@@ -163,7 +164,7 @@ class PageWriter:
         for c in word:
             em = c.size * k
             glyph, cat, s = plans[id(c)]
-            mask, box = self._render(glyph, s, self.rng.normal(0, 0.6 * o.messiness))
+            mask, box = self._render(glyph, s, self.rng.normal(0, 0.6 * o.messiness), HANGUL_ASPECT)
             if box is None:
                 continue
             a, b, t, u = box
@@ -210,7 +211,7 @@ class PageWriter:
                     w.append(row[n + len(w)])
                 for x in w:
                     shift[id(x)] = moved
-                packed = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] / k for x in w)
+                packed = sum(max(plans[id(x)][0].w - 4 / PX, 0.3) * plans[id(x)][2] * HANGUL_ASPECT / k for x in w)
                 packed += gap * sum(x.size for x in w[1:])
                 moved += packed - (w[-1].bbox[2] - w[0].bbox[0])
                 n += len(w)

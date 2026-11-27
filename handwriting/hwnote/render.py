@@ -43,7 +43,7 @@ class Options:
     seed: int | None = None
     # Pen width as a fraction of the Hangul height (0.12 in the writer's own notes); 0 keeps
     # the strokes exactly as written in the template.
-    stroke: float = 0.12
+    stroke: float = 0.13
     # How far each syllable's size is pulled towards the typical size of its shape
     # (0 = as written in its template box, 1 = all the same).
     evenness: float = 0.5
@@ -56,8 +56,10 @@ GRID_STEP = 4.24
 MID_LINE = set("-=+~×÷±∓→←⇒⇐⇔·∙:<>≤≥≠≈∞()[]{}|")
 
 # Spacing measured in the writer's notes, in units of the Hangul height.
-LETTER_GAP = {"hangul": 0.045, "latin": 0.05}
-WORD_GAP = 0.5
+LETTER_GAP = {"hangul": 0.015, "latin": 0.03}
+# Syllables in the writer's notes are a little narrower than in template boxes (w/h 0.75 vs 0.79).
+HANGUL_ASPECT = 0.95
+WORD_GAP = 0.42
 
 
 def _median(values, default):
@@ -217,7 +219,7 @@ class GlyphFactory:
                 # Jamo rarely fill their boxes; grow the syllable to the writer's typical height
                 # for this shape, without letting it get wider than such syllables are.
                 grow = min(1.7, max(1.0, 0.92 * h_px / cropped.shape[0]),
-                           max(1.0, 1.2 * w_px / cropped.shape[1]))
+                           max(1.0, 1.35 * w_px / cropped.shape[1]))
                 if grow > 1.0:
                     cropped = cv2.resize(cropped, None, fx=grow, fy=grow, interpolation=cv2.INTER_LINEAR)
                     r0 = h_px - (h_px - r0) * grow
@@ -292,10 +294,11 @@ def layout_bounds(opts):
     return 30.0, 282.0
 
 
-def _transform(mask, scale, angle, elastic, rng):
-    """Resize to output resolution, then rotate and wobble a little. Returns (mask, pad)."""
+def _transform(mask, scale, angle, elastic, rng, aspect=1.0):
+    """Resize to output resolution (``aspect`` narrows or widens), then rotate and wobble a
+    little. Returns (mask, pad)."""
     h, w = mask.shape
-    nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
+    nw, nh = max(1, int(round(w * scale * aspect))), max(1, int(round(h * scale)))
     m = cv2.resize(mask, (nw, nh), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_CUBIC)
     pad = int(max(nw, nh) * 0.12) + 2
     m = cv2.copyMakeBorder(m, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
@@ -399,10 +402,12 @@ class Renderer:
         if o.stroke > 0:
             # Same pen for every character: redraw the centre line at one width, so letters
             # copied, assembled from jamo or taken from the fallback font all match.
-            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, elastic, rng)
+            aspect = HANGUL_ASPECT if category == "hangul" else 1.0
+            centre, _ = _transform(self.factory.skeleton(glyph), scale, angle, elastic, rng, aspect)
             mask = _restroke((centre > 0.12).astype(np.float32), max(0.5, self.target_stroke / 2 - 0.5))
         else:
-            mask, _ = _transform(glyph.mask, scale, angle, elastic, rng)
+            mask, _ = _transform(glyph.mask, scale, angle, elastic, rng,
+                                 HANGUL_ASPECT if category == "hangul" else 1.0)
             mask = _crisp(mask)
         cols = np.nonzero(mask.max(axis=0) > 0.2)[0]
         rows = np.nonzero(mask.max(axis=1) > 0.2)[0]

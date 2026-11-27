@@ -10,6 +10,10 @@ from .charsets import BOTTOM_VOWELS, JAMO_PARTS, MIXED_VOWELS, RIGHT_VOWELS, dec
 
 WIDE_RIGHT = set("ㅐㅒㅔㅖ")
 
+# Jamo the writer draws larger in running notes than in template boxes (measured: an initial
+# ㅇ fills 56% of the syllable height in the notes, 40% in the template).
+NOTE_SIZE = {"ㅇ": 1.25}
+
 # (initial, vowel, final) boxes for vowels written to the right of the initial.
 RIGHT = {False: ((0.00, 0.08, 0.58, 0.92), (0.52, 0.00, 1.00, 1.00), None),
          True: ((0.04, 0.02, 0.54, 0.56), (0.50, 0.00, 0.96, 0.62), (0.14, 0.62, 0.86, 1.00))}
@@ -364,8 +368,8 @@ class Composer:
         natural = natural or {}
         heights = [h for j, (w, h) in natural.items() if j in "ㄱㄴㄷㄹㅁㅂㅅㅈㅊㅋㅌㅍㅎ"]
         ref = float(np.median(heights)) if heights else 0.0
-        self.rel = {j: float(np.clip((h / ref) ** 0.8, 0.65, 1.1)) for j, (w, h) in natural.items()
-                    if ref and j in "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"}
+        self.rel = {j: float(np.clip((h / ref) ** 0.8, 0.65, 1.1)) * NOTE_SIZE.get(j, 1.0)
+                    for j, (w, h) in natural.items() if ref and j in "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"}
 
     def learn(self, ch, mask):
         """Cut ``ch`` into jamo and remember them; returns the parts (or None)."""
@@ -443,7 +447,11 @@ class Composer:
                 continue
             mask, unit = item
             if unit is not None:
-                end = _paste_exact(canvas, mask, unit)
+                jamo = dict(wanted)[role]
+                if jamo in NOTE_SIZE:
+                    end = _paste_shape(canvas, mask, unit, (0.0, 0.0, NOTE_SIZE[jamo]))
+                else:
+                    end = _paste_exact(canvas, mask, unit)
             elif role == "V" and vclass == "mixed":
                 union = (min(b[0] for b in boxes["V"]), 0.0, 1.0, max(b[3] for b in boxes["V"]))
                 end = _paste_fit(canvas, mask, union, stretch=1.3)
@@ -460,7 +468,7 @@ class Composer:
                     shift = initial_end / canvas.shape[0] + 0.05 - box[1]
                     box = (box[0], box[1] + shift, box[2], box[3] + shift)
                     if initial_w:
-                        half = min((box[2] - box[0]) / 2, 1.0 * initial_w / canvas.shape[1])
+                        half = min((box[2] - box[0]) / 2, 0.8 * initial_w / canvas.shape[1])
                         mid = (box[0] + box[2]) / 2
                         box = (mid - half, box[1], mid + half, box[3])
                     align = "top"
@@ -513,7 +521,8 @@ def rebuild(ch, parts, size, composer, rng, swap_chance=0.35, jitter=0.025, scal
             other = composer.swap(role, jamo, vclass, has_final)
             if other is not None:
                 piece = other[0]
-        j = (rng.normal(0, jitter), rng.normal(0, jitter), 1 + rng.normal(0, scale_jitter))
+        grow = NOTE_SIZE.get(jamo, 1.0) ** 0.85  # inside a written syllable, a little gentler
+        j = (rng.normal(0, jitter), rng.normal(0, jitter), grow * (1 + rng.normal(0, scale_jitter)))
         _paste_shape(canvas, piece, unit, j)
     return canvas
 
