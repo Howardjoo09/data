@@ -591,7 +591,10 @@ def _run_job(job, path, kind, payload, opts, pages, name=""):
                     f.write(payload)
                 for jpeg in _layout_pages(path, source, pages, opts, int(job[:6], 16)):
                     add(jpeg)
-                os.remove(source)
+                try:
+                    os.remove(source)
+                except OSError:
+                    pass  # still held somewhere; old outputs are cleared after a day
             else:
                 renderer = render.Renderer(render.Profile(path), opts)
                 images = renderer.render(payload)

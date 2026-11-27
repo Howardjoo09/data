@@ -21,11 +21,14 @@ def _profile(path):
 
 
 def _document(pdf_path):
+    """The PDF, read into memory: an open file could not be deleted on Windows while a worker
+    keeps it."""
     import pymupdf
     if _cache.get("pdf_path") != pdf_path:
         if _cache.get("pdf") is not None:
             _cache["pdf"].close()
-        _cache["pdf"] = pymupdf.open(pdf_path)
+        with open(pdf_path, "rb") as f:
+            _cache["pdf"] = pymupdf.open(stream=f.read(), filetype="pdf")
         _cache["pdf_path"] = pdf_path
     return _cache["pdf"]
 

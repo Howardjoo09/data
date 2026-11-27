@@ -213,6 +213,9 @@ def self_test():
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support()  # page-writing workers re-run this program
+    for stream in (sys.stdout, sys.stderr):  # a Windows console may not take Korean
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="backslashreplace")
     if "--self-test" in sys.argv:
         try:
             sys.exit(self_test())
